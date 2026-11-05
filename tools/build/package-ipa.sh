@@ -36,6 +36,7 @@ xcodebuild \
   -destination 'generic/platform=iOS' \
   -derivedDataPath "$DERIVED" \
   IPHONEOS_DEPLOYMENT_TARGET=18.0 \
+  ENABLE_DEBUG_DYLIB=NO \
   CODE_SIGNING_ALLOWED=NO \
   CODE_SIGNING_REQUIRED=NO \
   CODE_SIGN_IDENTITY='' \

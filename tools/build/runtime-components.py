@@ -270,7 +270,7 @@ def validate_ipa(ipa, sdk):
             raise ValueError('IPA is missing runtime components')
         for name in CONTRACT:
             validate_manifest(name, manifest['components'][name], lambda p: archive.read(prefix + p), sdk)
-        for path in ['Madeira', 'Madeira.debug.dylib', 'prefix-template.tar.gz',
+        for path in ['Madeira', 'prefix-template.tar.gz',
                      'x86_64-vcruntime/vcruntime140.dll', 'i386-windows/ntdll.dll']:
             if not archive.read(prefix + path):
                 raise ValueError(f'empty app resource: {path}')
