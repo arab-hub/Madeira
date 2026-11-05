@@ -1071,6 +1071,45 @@ static void socket_cleanup(void)
     if (!do_it_once++) unlink( server_socket_name );
 }
 
+#ifdef WINE_IOS
+/* Some hosts refuse bind() of an AF_UNIX socket in the prefix with EPERM
+ * (seen with Madeira running inside LiveContainer's LiveProcess extension:
+ * "[Wine] FATAL: bind: Operation not permitted", after which the server
+ * thread exited before main_loop and the first Wine process waited forever
+ * for its request_fd). On iOS no client connects through the master socket:
+ * the app hands the first Wine process a socketpair end
+ * (wineserver_inject_client_fd / WINESERVERSOCKET) and child processes get
+ * theirs over their parent's connection. The iOS poll loop in fd_ios.c still
+ * treats pollfd[0] as the master fd, so keep one there: one end of a
+ * socketpair whose other end stays open and silent, so it never polls
+ * readable. */
+static int ios_master_is_placeholder;
+static int ios_master_placeholder_peer = -1;
+
+static int ios_master_placeholder( int failed_fd, int bind_errno )
+{
+    int pair[2];
+    char cwd[1024];
+
+    if (!getcwd( cwd, sizeof(cwd) )) strcpy( cwd, "?" );
+    ws_log( "[wineserver] bind %s/%s refused: %s (errno=%d) -- continuing with a "
+            "placeholder master socket; clients connect through injected socketpairs",
+            cwd, server_socket_name, strerror( bind_errno ), bind_errno );
+    close( failed_fd );
+    if (socketpair( AF_UNIX, SOCK_STREAM, 0, pair ) == -1)
+    {
+        ws_log( "[wineserver] placeholder master socketpair failed: %s", strerror( errno ));
+        errno = bind_errno;
+        return -1;
+    }
+    fcntl( pair[0], F_SETFD, FD_CLOEXEC );
+    fcntl( pair[1], F_SETFD, FD_CLOEXEC );
+    ios_master_placeholder_peer = pair[1];  /* kept open for the server's lifetime */
+    ios_master_is_placeholder = 1;
+    return pair[0];
+}
+#endif
+
 /* create a directory and check its permissions */
 static void create_dir( const char *name, struct stat *st )
 {
@@ -1328,11 +1367,19 @@ static void acquire_lock(void)
             exit(2); /* we didn't get the lock, exit with special status */
 #endif
         }
+#ifdef WINE_IOS
+        if ((fd = ios_master_placeholder( fd, errno )) == -1)
+#endif
         fatal_error( "bind: %s\n", strerror( errno ));
     }
-    atexit( socket_cleanup );
-    chmod( server_socket_name, 0600 );  /* make sure no other user can connect */
-    if (listen( fd, 5 ) == -1) fatal_error( "listen: %s\n", strerror( errno ));
+#ifdef WINE_IOS
+    if (!ios_master_is_placeholder)
+#endif
+    {
+        atexit( socket_cleanup );
+        chmod( server_socket_name, 0600 );  /* make sure no other user can connect */
+        if (listen( fd, 5 ) == -1) fatal_error( "listen: %s\n", strerror( errno ));
+    }
     /* iOS: make master socket non-blocking so accept() never blocks */
     fcntl( fd, F_SETFL, O_NONBLOCK );
     ws_log("[wineserver] acquire_lock: listening on fd=%d (NONBLOCK), server_dir=%s", fd, server_dir);
