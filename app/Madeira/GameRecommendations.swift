@@ -846,15 +846,19 @@ enum GameRecommendations {
     /// joins the runs past that region (880 MB on the next launch). Not
     /// MADEIRA_X64_IMAGE_NOCOPY: with it REDprelauncher.exe read a null object's
     /// field (AV at 4) in PocoFoundation.dll+0x27cfe during start-up, before the
-    /// game was started, so no swap-images either (it needs NOCOPY). The memory
-    /// lines are RDR2's swap tier, another large D3D12 world. Not yet shown to reach
-    /// the menu on a device.
+    /// game was started, so no swap-images either (it needs NOCOPY). Next the game
+    /// reserved 16 GB, then asked for 64 GB unhinted ("[oversize] ml1298 ... does not
+    /// fit the map and fails"), then 32 GB, and read address 0x28 a second after
+    /// start; oversize-reserve serves the 64 GB request with a real 16 GB part, as
+    /// for Final Fantasy Tactics. The memory lines are RDR2's swap tier, another
+    /// large D3D12 world. Not yet shown to reach the menu on a device.
     static let cyberpunk2077 = GameRecommendation(
         id: "cyberpunk-2077", title: "Cyberpunk 2077", version: 1,
         config: """
         # Madeira's recommended settings for Cyberpunk 2077.
         # Reset to Recommended, at the bottom of the game's settings, brings them back.
         pool-split = 1
+        oversize-reserve = 1
         env.MADEIRA_POOL_HEAD_RESERVE_MB = 128
         swap-mb = 8192
         swap-mode = 2
