@@ -843,21 +843,22 @@ enum GameRecommendations {
     /// above the executable window blocked the early placeholder, and the game's x64
     /// images were copied into the pool until libxess_fg.dll and libxess.dll (up to
     /// 74 MB each) failed with c0000017 and the game exited with c0000135. pool-split
-    /// joins the runs past that region and MADEIRA_X64_IMAGE_NOCOPY runs the x64
-    /// images in place, as for Dark Souls III. The memory lines are RDR2's swap tier,
-    /// another large D3D12 world. Not yet shown to reach the menu on a device.
+    /// joins the runs past that region (880 MB on the next launch). Not
+    /// MADEIRA_X64_IMAGE_NOCOPY: with it REDprelauncher.exe read a null object's
+    /// field (AV at 4) in PocoFoundation.dll+0x27cfe during start-up, before the
+    /// game was started, so no swap-images either (it needs NOCOPY). The memory
+    /// lines are RDR2's swap tier, another large D3D12 world. Not yet shown to reach
+    /// the menu on a device.
     static let cyberpunk2077 = GameRecommendation(
         id: "cyberpunk-2077", title: "Cyberpunk 2077", version: 1,
         config: """
         # Madeira's recommended settings for Cyberpunk 2077.
         # Reset to Recommended, at the bottom of the game's settings, brings them back.
         pool-split = 1
-        env.MADEIRA_X64_IMAGE_NOCOPY = 1
         env.MADEIRA_POOL_HEAD_RESERVE_MB = 128
         swap-mb = 8192
         swap-mode = 2
         env.MADEIRA_SWAP_MIN_KB = 64
-        swap-images = 1
         vram-mb = 2304
         env.MADEIRA_LOCK_ORPHAN = stamped
         env.MADEIRA_EC_HOOK_TRACE = 0

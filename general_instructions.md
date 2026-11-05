@@ -67,4 +67,4 @@ A game's own config is `Library/Application Support/GameConfigs/<FNV-1a 64 of th
 
 ## JIT pool size
 
-A single pool region cannot pass about 880 MB: it must sit below `0x180000000`, above the 128 MB executable window. `pool = 1152` without `pool-split = 1` always shrinks. When anything is mapped just above the window at image load, the early placeholder fails and the pool drops below 500 MB. Big 64-bit games then need `pool-split = 1` and `env.MADEIRA_X64_IMAGE_NOCOPY = 1` (Cyberpunk 2077, 2026-11-05: 464 MB pool, libxess failed with c0000017).
+A single pool region cannot pass about 880 MB: it must sit below `0x180000000`, above the 128 MB executable window. `pool = 1152` without `pool-split = 1` always shrinks. When anything is mapped just above the window at image load, the early placeholder fails and the pool drops below 500 MB. Big 64-bit games then need `pool-split = 1` (Cyberpunk 2077, 2026-11-05: 464 MB pool, libxess failed with c0000017; 880 MB with it). `env.MADEIRA_X64_IMAGE_NOCOPY = 1` crashed Cyberpunk's REDprelauncher.exe in PocoFoundation.dll, so test it per game.
