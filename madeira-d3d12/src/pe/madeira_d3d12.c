@@ -18443,6 +18443,23 @@ static enum WMTBlendFactor mad_blend_factor(D3D12_BLEND b) {
     default: return WMTBlendFactorOne;
     }
 }
+/* Metal accepts the Source1 blend factors on colour attachment 0 only, and its
+ * pipeline validation aborts the whole process otherwise ("failed assertion
+ * `Render Pipeline Descriptor Validation ... is using a blend factor
+ * (MTLBlendFactorSource1Color)which is can only be used for render target 0'").
+ * D3D12 leaves dual-source blending with several render targets undefined, and
+ * drivers accept it; Cyberpunk 2077 2.5 creates such a pipeline while a save
+ * loads (2026-11-05), and with IndependentBlendEnable off every render target
+ * copies RT0's SRC1 factors. On RT1 and up the first-source factor stands in. */
+static int mad_blend_factor_no_src1(enum WMTBlendFactor *f) {
+    switch (*f) {
+    case WMTBlendFactorSource1Color: *f = WMTBlendFactorSourceColor; return 1;
+    case WMTBlendFactorOneMinusSource1Color: *f = WMTBlendFactorOneMinusSourceColor; return 1;
+    case WMTBlendFactorSource1Alpha: *f = WMTBlendFactorSourceAlpha; return 1;
+    case WMTBlendFactorOneMinusSource1Alpha: *f = WMTBlendFactorOneMinusSourceAlpha; return 1;
+    default: return 0;
+    }
+}
 static enum WMTBlendOperation mad_blend_op(D3D12_BLEND_OP o) {
     switch (o) {
     case D3D12_BLEND_OP_SUBTRACT: return WMTBlendOperationSubtract;
@@ -19325,6 +19342,17 @@ static HRESULT device_CreateGraphicsPipelineState_impl(ID3D12Device *This,
         rp.colors[i].dst_rgb_blend_factor = mad_blend_factor(b->DestBlend);
         rp.colors[i].src_alpha_blend_factor = mad_blend_factor(b->SrcBlendAlpha);
         rp.colors[i].dst_alpha_blend_factor = mad_blend_factor(b->DestBlendAlpha);
+        if (i > 0) {   /* see mad_blend_factor_no_src1 */
+            int n = mad_blend_factor_no_src1(&rp.colors[i].src_rgb_blend_factor)
+                  + mad_blend_factor_no_src1(&rp.colors[i].dst_rgb_blend_factor)
+                  + mad_blend_factor_no_src1(&rp.colors[i].src_alpha_blend_factor)
+                  + mad_blend_factor_no_src1(&rp.colors[i].dst_alpha_blend_factor);
+            static unsigned said_src1;
+            if (n && said_src1++ < 8)
+                d3d12_log("[madeira-d3d12] dual-source blend factors on render target %u (of %u, independent=%u): "
+                          "Metal allows them on RT0 only, using the first-source factors there\n",
+                          i, (unsigned)desc->NumRenderTargets, (unsigned)desc->BlendState.IndependentBlendEnable);
+        }
         rp.colors[i].write_mask = mad_write_mask(b->RenderTargetWriteMask);
         if (b->LogicOpEnable) { static unsigned said; if (!said++) d3d12_log("[madeira-d3d12] logic ops are not implemented\n"); }
         {   /* ml1106, ml1107: every render target's blend state (D3D values; Metal values for rt0) */
