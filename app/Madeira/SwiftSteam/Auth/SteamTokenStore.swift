@@ -37,19 +37,22 @@ class SteamTokenStore {
             return
         }
 
-        // Delete existing entry first
-        deleteKeychainItem()
-
-        // Add new entry
+        // Update in place, so a failure or a crash keeps the old sign-in; add if there is none.
+        // The update also moves an item of another accessibility class to this one.
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: serviceName,
-            kSecAttrAccount as String: "steam_tokens",
+            kSecAttrAccount as String: "steam_tokens"
+        ]
+        let attributes: [String: Any] = [
             kSecValueData as String: data,
             kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
         ]
 
-        let status = SecItemAdd(query as CFDictionary, nil)
+        var status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+        if status == errSecItemNotFound {
+            status = SecItemAdd(query.merging(attributes) { $1 } as CFDictionary, nil)
+        }
         if status == errSecSuccess {
             SteamLog.trace("Tokens saved to Keychain")
         } else {

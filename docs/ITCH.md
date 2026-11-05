@@ -54,8 +54,9 @@ platforms listed), and installs one upload:
 
 A `.zip` or `.7z` unpacks into `C:\itch\<title>`; a lone `.exe` goes there as it is.
 `.rar` is not supported; the sheet says so. The unpackers read the archive a piece at a
-time (ZIP64 too), check every CRC-32, and only replace the install folder once
-every file is in. Names that leave the folder, absolute names, encrypted entries,
+time (ZIP64 too), check every CRC-32, and only touch the install folder once every
+file is in; an update then replaces the files it has and keeps the others (saves).
+Names that leave the folder, absolute names, encrypted entries,
 symbolic links and two names that differ only in case stop them.
 
 The 7z reader (`itch_7z.c`) decodes each folder of the archive as a stream, so a

@@ -1317,6 +1317,7 @@ struct SteamCloudQuitRow: View {
             guard case .done(let count) = steam.cloudQuit else { return }
             LogStore.shared.log("[steam-cloud] app=\(appID) quit-upload done files=\(count): closing Madeira")
             try? await Task.sleep(nanoseconds: 1_200_000_000)   // long enough to read the result
+            LibraryModel.shared.prepareForExit()
             exit(0)
         }
     }

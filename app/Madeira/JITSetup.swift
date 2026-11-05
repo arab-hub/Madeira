@@ -90,11 +90,15 @@ enum JITPairingFileStore {
             kSecAttrService as String: service,
             kSecAttrAccount as String: account
         ]
-        SecItemDelete(item as CFDictionary)
-        var add = item
-        add[kSecValueData as String] = data
-        add[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-        let status = SecItemAdd(add as CFDictionary, nil)
+        // In place, so a failure or a crash keeps the old pairing; this also moves an item
+        // of another accessibility class to this one.
+        let attributes: [String: Any] = [kSecValueData as String: data,
+                                         kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly]
+        var status = SecItemUpdate(item as CFDictionary, attributes as CFDictionary)
+        if status == errSecItemNotFound {
+            let add = item.merging(attributes) { $1 }
+            status = SecItemAdd(add as CFDictionary, nil)
+        }
         guard status == errSecSuccess else {
             throw NSError(domain: "MadeiraJIT", code: 12,
                           userInfo: [NSLocalizedDescriptionKey:

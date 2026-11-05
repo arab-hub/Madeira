@@ -843,6 +843,7 @@ enum StikJITHelper {
             LogStore.shared.log("BAD POOL: no valid placement after retries. Killing in 10s — please relaunch.", level: .error)
             DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 10) {
                 LogStore.shared.log("BAD POOL — exiting now. Relaunch the app.", level: .error)
+                LibraryFileWriter.drain()   // off the main thread and before any game: only the queued library save
                 exit(0)
             }
             return nil

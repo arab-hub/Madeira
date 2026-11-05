@@ -260,12 +260,16 @@ enum ItchKeyStore {
     }
 
     @discardableResult static func save(_ key: String) -> Bool {
-        delete()
-        let item: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
-                                   kSecAttrAccount as String: account, kSecValueData as String: Data(key.utf8),
-                                   kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
-                                   kSecAttrSynchronizable as String: false]
-        return SecItemAdd(item as CFDictionary, nil) == errSecSuccess
+        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
+                                    kSecAttrAccount as String: account]
+        let attributes: [String: Any] = [kSecValueData as String: Data(key.utf8),
+                                         kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+                                         kSecAttrSynchronizable as String: false]
+        let status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+        if status == errSecItemNotFound {
+            return SecItemAdd(query.merging(attributes) { $1 } as CFDictionary, nil) == errSecSuccess
+        }
+        return status == errSecSuccess
     }
 
     static func delete() {

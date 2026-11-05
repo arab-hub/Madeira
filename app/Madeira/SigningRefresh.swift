@@ -193,10 +193,13 @@ enum SigningAccountStore {
     @discardableResult
     static func store(_ account: SigningAccount) -> Bool {
         guard account.usable, let data = try? PropertyListEncoder().encode(account) else { return false }
-        SecItemDelete(item as CFDictionary)
-        var add = item
-        add[kSecValueData as String] = data
-        add[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        // In place, so a failure or a crash keeps the old sign-in; this also moves an item
+        // of another accessibility class to this one.
+        let attributes: [String: Any] = [kSecValueData as String: data,
+                                         kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly]
+        let status = SecItemUpdate(item as CFDictionary, attributes as CFDictionary)
+        guard status == errSecItemNotFound else { return status == errSecSuccess }
+        let add = item.merging(attributes) { $1 }
         return SecItemAdd(add as CFDictionary, nil) == errSecSuccess
     }
 

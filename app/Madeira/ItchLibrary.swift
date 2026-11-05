@@ -41,6 +41,14 @@ struct ItchInstalledGame: Codable, Sendable {
     var programPath: String { folder + "/" + launchExe }
 }
 
+/// What a download put in place. `program` and `installer` come from the new build alone:
+/// files of an older build stay in the folder and must not be taken for it.
+private struct ItchUnpacked: Sendable {
+    var bytes: Int64
+    var program: String?
+    var installer: (ItchSetup.Kind, String)?
+}
+
 struct ItchDownloadProgress: Equatable, Sendable {
     enum Phase: String, Sendable { case preparing, downloading, unpacking }
     var phase: Phase = .preparing
@@ -358,6 +366,8 @@ final class ItchTransfer: NSObject, URLSessionDownloadDelegate, @unchecked Senda
     private var inSession = false
     private var resumeAfterSession = Set<Int>()
     private var resumeAfterBackground = Set<Int>()
+    /// The folder of each install that has not finished yet (newFolder), per game.
+    private var plannedFolders: [Int: String] = [:]
     private var started = false
     private var timer: Timer?
     private var grace: UIBackgroundTaskIdentifier = .invalid
@@ -641,9 +651,33 @@ final class ItchTransfer: NSObject, URLSessionDownloadDelegate, @unchecked Senda
         installed[id] = nil
         writeInstalled()
         LibraryModel.shared.removeItch(gameID: id)
-        let folder = Self.drive.appendingPathComponent(record.folder, isDirectory: true)
-        Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: folder) }
+        // Games installed before folders were unique can share one: it goes with the last of them.
+        if !installed.values.contains(where: { $0.folder.lowercased() == record.folder.lowercased() }) {
+            let folder = Self.drive.appendingPathComponent(record.folder, isDirectory: true)
+            Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: folder) }
+        }
         ItchLog.event("[itch-download] uninstalled id=\(id)")
+    }
+
+    /// A new install's folder, relative to drive_c: the game's title, with its id when another
+    /// game's record uses that folder or something of that name is already there. Names compare
+    /// without case, as Wine's drive_c does.
+    private func newFolder(for game: ItchOwnedGame) -> String {
+        var taken = Set(installed.values.map { $0.folder.lowercased() })
+        for (other, folder) in plannedFolders where other != game.id { taken.insert(folder.lowercased()) }
+        let root = Self.drive.appendingPathComponent(Self.installRoot, isDirectory: true)
+        for name in (try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? [] {
+            taken.insert((Self.installRoot + "/" + name).lowercased())
+        }
+        let base = Self.installRoot + "/" + Self.safeName(game.title)
+        if !taken.contains(base.lowercased()) { return base }
+        var folder = base + " (\(game.id))"
+        var attempt = 1
+        while taken.contains(folder.lowercased()) {
+            attempt += 1
+            folder = base + " (\(game.id)-\(attempt))"
+        }
+        return folder
     }
 
     private func pump() {
@@ -671,7 +705,9 @@ final class ItchTransfer: NSObject, URLSessionDownloadDelegate, @unchecked Senda
                 throw ItchInstallError.unsupportedFile("." + ((upload.filename as NSString).pathExtension.isEmpty ? "unknown" : (upload.filename as NSString).pathExtension))
             }
             let record = installed[id]
-            let folder = record?.folder ?? (Self.installRoot + "/" + Self.safeName(game.title))
+            // A retry after a failed install keeps the folder that install chose.
+            let folder = record?.folder ?? plannedFolders[id] ?? newFolder(for: game)
+            if record == nil { plannedFolders[id] = folder }
             let target = Self.drive.appendingPathComponent(folder, isDirectory: true)
             try FileManager.default.createDirectory(at: Self.downloadsFolder, withIntermediateDirectories: true)
             if let free = Self.freeSpace(at: URL.documentsDirectory), upload.size > 0 {
@@ -701,8 +737,7 @@ final class ItchTransfer: NSObject, URLSessionDownloadDelegate, @unchecked Senda
             try Task.checkCancellation()
             downloads[id]?.progress = ItchDownloadProgress(phase: .unpacking)
             let title = game.title
-            let wasSetup = record?.setup != nil
-            let installBytes: Int64 = try await Task.detached(priority: .userInitiated) {
+            let unpacked = try await Task.detached(priority: .userInitiated) { () throws -> ItchUnpacked in
                 let fm = FileManager.default
                 try fm.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
                 let report: (UInt64, UInt64) -> Void = { done, total in
@@ -710,46 +745,67 @@ final class ItchTransfer: NSObject, URLSessionDownloadDelegate, @unchecked Senda
                         ItchLibrary.shared.downloads[id]?.progress = ItchDownloadProgress(phase: .unpacking, totalBytes: total, doneBytes: done)
                     }
                 }
-                if var bytes = try ItchArchive.unpackAny(archive, to: target, progress: report) {
-                    try? fm.removeItem(at: archive)
+                var program: String?
+                var installer: (ItchSetup.Kind, String)?
+                var inner: (unpacked: UInt64, removed: UInt64, rar: Bool)?
+                let archiveBytes = try ItchArchive.unpackAny(archive, to: target, progress: report, staged: { build in
+                    program = ItchProgram.find(in: build, title: title)
+                    installer = program == nil ? ItchSetup.installer(in: build) : nil
+                    guard program == nil, installer == nil else { return }
                     // A download that only holds the game's real archive (a .7z beside a
                     // README, as some itch.io builds are): unpack that too.
-                    if ItchProgram.find(in: target, title: title) == nil, ItchSetup.installer(in: target) == nil {
-                        let inner = try ItchArchive.unpackInner(in: target, progress: report)
+                    inner = try ItchArchive.unpackInner(in: build, progress: report)
+                    program = ItchProgram.find(in: build, title: title)
+                    installer = program == nil ? ItchSetup.installer(in: build) : nil
+                })
+                if var bytes = archiveBytes {
+                    try? fm.removeItem(at: archive)
+                    // An installer still waiting from an older upload would run instead of this build.
+                    try? fm.removeItem(at: target.appendingPathComponent(ItchSetup.folderName, isDirectory: true))
+                    if let inner {
                         if inner.rar { throw ItchInstallError.innerRar }
                         if inner.unpacked > 0 || inner.removed > 0 {
                             ItchLog.event("[itch-download] inner-archive id=\(id) bytes=\(inner.unpacked)")
                         }
                         bytes = bytes - min(bytes, inner.removed) + inner.unpacked
                     }
-                    return Int64(bytes)
+                    return ItchUnpacked(bytes: Int64(bytes), program: program, installer: installer)
                 }
                 // A lone program: the game itself, or its installer (ItchSetup), kept in the
                 // hidden setup folder so that the game it installs is the folder's program.
+                // Nothing else in the folder goes: it may hold the game's saves, and an
+                // installer updates the folder itself.
                 guard isExe else { throw ItchArchiveError.notZip }
                 let file = Self.safeName(upload.filename)
                 let setup = ItchSetup.kind(of: archive, fileName: file) != nil
-                // An update of a game that was installed by its installer replaces only the
-                // installer: the installer updates the folder itself.
-                let keepGame = setup && record != nil && !wasSetup
-                if fm.fileExists(atPath: target.path) && !keepGame { try fm.removeItem(at: target) }
-                let place = setup ? target.appendingPathComponent(ItchSetup.folderName, isDirectory: true) : target
-                if setup, fm.fileExists(atPath: place.path) { try fm.removeItem(at: place) }
+                let hidden = target.appendingPathComponent(ItchSetup.folderName, isDirectory: true)
+                if fm.fileExists(atPath: hidden.path) { try fm.removeItem(at: hidden) }
+                let place = setup ? hidden : target
                 try fm.createDirectory(at: place, withIntermediateDirectories: true)
-                let program = place.appendingPathComponent(file)
-                try fm.moveItem(at: archive, to: program)
-                return (try? fm.attributesOfItem(atPath: program.path)[.size] as? Int64) ?? upload.size
+                let names = (try? fm.contentsOfDirectory(atPath: place.path)) ?? []
+                for old in names where old.lowercased() == file.lowercased() {
+                    try fm.removeItem(at: place.appendingPathComponent(old))
+                }
+                let lone = place.appendingPathComponent(file)
+                try fm.moveItem(at: archive, to: lone)
+                let bytes = (try? fm.attributesOfItem(atPath: lone.path)[.size] as? Int64) ?? upload.size
+                return ItchUnpacked(bytes: bytes, program: setup || ItchProgram.helper(file) ? nil : file, installer: nil)
             }.value
+            let installBytes = unpacked.bytes
             var finished = ItchInstalledGame(gameID: id, title: title, folder: folder, uploadID: upload.id, buildID: upload.buildID,
                                              version: upload.version, launchExe: "", arguments: "", installBytes: installBytes)
             // A downloaded installer waits in the hidden setup folder (it runs even when an
-            // update finds the game it installed before); else the folder's program; else
-            // the archive's one installer.
+            // update finds the game it installed before); else the new build's program; else
+            // its one installer; else what the folder holds as a whole.
             let downloadedSetup = FileManager.default.fileExists(atPath: target.appendingPathComponent(ItchSetup.folderName).path)
-            let program = downloadedSetup ? nil : ItchProgram.find(in: target, title: title)
+            var program: String?
+            if !downloadedSetup {
+                program = unpacked.program
+                if program == nil, unpacked.installer == nil { program = ItchProgram.find(in: target, title: title) }
+            }
             if let program {
                 finished.launchExe = program
-            } else if let found = ItchSetup.installer(in: target) {
+            } else if let found = unpacked.installer ?? ItchSetup.installer(in: target) {
                 let (kind, installer) = found
                 // An installer (alone, or the only one in the archive): Play runs it once.
                 let script = target.appendingPathComponent(ItchSetup.folderName + "/" + ItchSetup.scriptName)
@@ -764,6 +820,7 @@ final class ItchTransfer: NSObject, URLSessionDownloadDelegate, @unchecked Senda
                 throw ItchInstallError.noProgram
             }
             installed[id] = finished
+            plannedFolders[id] = nil
             writeInstalled()
             downloads[id] = nil
             await LibraryModel.shared.upsertItch(finished, cover: game.cover)

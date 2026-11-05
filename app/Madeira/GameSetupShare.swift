@@ -28,6 +28,9 @@
 //
 
 import Foundation
+#if canImport(Compression)
+import Compression
+#endif
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
@@ -41,6 +44,10 @@ struct GameSetup {
     static let fileExtension = "madeirasetup"
     /// Settings files larger than this are left out of a setup.
     static let iniLimit = 256 * 1024
+    /// A setup file larger than this is refused.
+    static let fileLimit = 8 * 1024 * 1024
+    /// A compressed setup that unpacks to more than this is refused.
+    static let unpackedLimit = 32 * 1024 * 1024
 
     var title: String
     var steamAppID: Int?
@@ -217,14 +224,68 @@ struct GameSetup {
         switch kind {
         case "j": try self.init(data: bytes)
         case "z":
-            #if canImport(Darwin)
-            guard let body = try? (bytes as NSData).decompressed(using: .zlib) as Data else { throw ReadError.notASetup }
-            try self.init(data: body)
+            #if canImport(Compression)
+            try self.init(data: try Self.unpacked(bytes, limit: Self.unpackedLimit))
             #else
             throw ReadError.notASetup
             #endif
         default: throw ReadError.notASetup
         }
+    }
+
+    #if canImport(Compression)
+    /// What text() compressed, a piece at a time, refused once it passes `limit`: a few
+    /// bytes of text can unpack to gigabytes. COMPRESSION_ZLIB is the format
+    /// NSData.compressed(using: .zlib) writes.
+    static func unpacked(_ packed: Data, limit: Int) throws -> Data {
+        let chunk = 64 * 1024
+        let stream = UnsafeMutablePointer<compression_stream>.allocate(capacity: 1)
+        defer { stream.deallocate() }
+        guard compression_stream_init(stream, COMPRESSION_STREAM_DECODE, COMPRESSION_ZLIB) == COMPRESSION_STATUS_OK else {
+            throw ReadError.notASetup
+        }
+        defer { compression_stream_destroy(stream) }
+        let piece = UnsafeMutablePointer<UInt8>.allocate(capacity: chunk)
+        defer { piece.deallocate() }
+        var body = Data()
+        try packed.withUnsafeBytes { (source: UnsafeRawBufferPointer) -> Void in
+            guard let start = source.bindMemory(to: UInt8.self).baseAddress else { throw ReadError.notASetup }
+            stream.pointee.src_ptr = start
+            stream.pointee.src_size = source.count
+            while true {
+                stream.pointee.dst_ptr = piece
+                stream.pointee.dst_size = chunk
+                let status = compression_stream_process(stream, Int32(COMPRESSION_STREAM_FINALIZE.rawValue))
+                guard status != COMPRESSION_STATUS_ERROR else { throw ReadError.notASetup }
+                let produced = chunk - stream.pointee.dst_size
+                guard body.count + produced <= limit else { throw ReadError.notASetup }
+                body.append(piece, count: produced)
+                if status == COMPRESSION_STATUS_END { return }
+                if produced == 0 { throw ReadError.notASetup }   // cut short: no end, and nothing more comes
+            }
+        }
+        return body
+    }
+    #endif
+
+    /// What the setup does at launch, word for word, for Apply Shared Setup to show: the
+    /// arguments and the program reach Windows code, so they are not left to a count.
+    var launchLines: [String] {
+        func text(_ key: String) -> String? {
+            guard let value = entry[key] as? String else { return nil }
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        var out: [String] = []
+        if let arguments = text("arguments") { out.append("Launch arguments: " + arguments) }
+        if let program = text("steamProgram") { out.append("Steam program: " + program) }
+        if let folder = text("steamProgramFolder") { out.append("Steam working folder: " + folder) }
+        if let arguments = text("steamProgramArguments") { out.append("Steam program arguments: " + arguments) }
+        if (entry["startServices"] as? Bool) == true { out.append("Starts Windows services (services.exe) before the game") }
+        // WineProcessBridge exports env.NAME lines over what the library set, MADEIRA_EXE and MADEIRA_ARGS too.
+        let variables = configLines.filter { $0.hasPrefix("env.") }.count
+        if variables > 0 { out.append("Sets \(variables) environment variable(s), which can change what starts: read Config lines") }
+        return out
     }
 
     /// What the setup changes, for Apply Shared Setup's list.
@@ -361,9 +422,15 @@ extension GameSetup {
     static func read(file url: URL) throws -> GameSetup {
         let access = url.startAccessingSecurityScopedResource()
         defer { if access { url.stopAccessingSecurityScopedResource() } }
-        let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
-        guard size <= 8 * 1024 * 1024 else { throw ReadError.notASetup }
-        let bytes = try Data(contentsOf: url)
+        // Read up to the limit, whatever size the file reports (a file provider may report none).
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var bytes = Data()
+        while bytes.count <= fileLimit {
+            guard let piece = try handle.read(upToCount: 1 << 20), !piece.isEmpty else { break }
+            bytes.append(piece)
+        }
+        guard bytes.count <= fileLimit else { throw ReadError.notASetup }
         if let setup = try? GameSetup(data: bytes) { return setup }
         return try GameSetup(text: String(decoding: bytes, as: UTF8.self))
     }
@@ -477,8 +544,11 @@ struct GameSetupApplySheet: View {
                             .foregroundStyle(.orange)
                     }
                 }
-                if !setup.configLines.isEmpty || !setup.iniFiles.isEmpty {
+                if !setup.launchLines.isEmpty || !setup.configLines.isEmpty || !setup.iniFiles.isEmpty {
                     Section {
+                        ForEach(Array(setup.launchLines.enumerated()), id: \.offset) {
+                            Text($0.element).font(.caption.monospaced()).textSelection(.enabled)
+                        }
                         if !setup.configLines.isEmpty {
                             DisclosureGroup("Config lines") {
                                 ForEach(Array(setup.configLines.enumerated()), id: \.offset) {

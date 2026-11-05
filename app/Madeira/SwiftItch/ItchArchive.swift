@@ -8,8 +8,9 @@ import zlib
 // Unpacking an itch.io download (docs/ITCH.md). Most itch.io games are a .zip of the
 // game's folder, often several GB, so the archive is read from its file a piece at a
 // time, never whole: the central directory (ZIP64 too), then each entry stored or
-// deflated, its CRC-32 checked. Entries land in a staging folder that replaces the
-// install folder only when every entry is in. Names that leave the folder, absolute
+// deflated, its CRC-32 checked. Entries land in a staging folder that goes over the
+// install folder only when every entry is in: its files replace the ones with the same
+// name and the rest of the folder (a game's saves) stays. Names that leave the folder, absolute
 // names, encrypted entries, symbolic links and two names Windows would see as one
 // (Wine's drive_c is case-insensitive) stop the unpack.
 
@@ -152,11 +153,68 @@ enum ItchArchive {
         return entries
     }
 
-    /// Unpacks `archive` into `destination`, replacing what was there only once every
-    /// entry is in. `progress` gets the bytes written so far and the total.
+    /// Puts a finished staging folder in place: as `destination`, or over the folder there.
+    private static func install(_ staging: URL, at destination: URL) throws {
+        let fm = FileManager.default
+        var isFolder: ObjCBool = false
+        if fm.fileExists(atPath: destination.path, isDirectory: &isFolder) {
+            if isFolder.boolValue {
+                try merge(staging, into: destination)
+                try? fm.removeItem(at: staging)
+                return
+            }
+            try fm.removeItem(at: destination)
+        }
+        try fm.moveItem(at: staging, to: destination)
+    }
+
+    /// Moves `source`'s contents into `destination`. A file replaces the one of the same
+    /// name, in one step, and the folder's other files stay. Names compare without case,
+    /// as Wine's drive_c does. Nothing is deleted first, so a failure part way leaves a
+    /// mix of old and new files and no file lost; the caller keeps its archive for a retry.
+    private static func merge(_ source: URL, into destination: URL) throws {
+        let fm = FileManager.default
+        func isFolder(_ url: URL) -> Bool {
+            // Not following a link: a link in the old folder must not lead the new files out of it.
+            (try? fm.attributesOfItem(atPath: url.path)[.type] as? FileAttributeType) == .typeDirectory
+        }
+        func move(_ from: URL, over to: URL) throws {
+            guard rename(from.path, to.path) == 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno), userInfo: nil) }
+        }
+        var existing: [String: String] = [:]
+        for name in try fm.contentsOfDirectory(atPath: destination.path) where existing[name.lowercased()] == nil {
+            existing[name.lowercased()] = name
+        }
+        for name in try fm.contentsOfDirectory(atPath: source.path) {
+            let from = source.appendingPathComponent(name)
+            let to = destination.appendingPathComponent(name)
+            guard let old = existing[name.lowercased()] else {
+                try fm.moveItem(at: from, to: to)
+                continue
+            }
+            let there = destination.appendingPathComponent(old)
+            if isFolder(from) && isFolder(there) {
+                try merge(from, into: there)
+            } else if isFolder(from) || isFolder(there) {
+                // A folder where a file was, or the other way round: the new build's wins.
+                try fm.removeItem(at: there)
+                try fm.moveItem(at: from, to: to)
+                continue
+            } else {
+                try move(from, over: there)
+            }
+            if old != name { _ = rename(there.path, to.path) }   // the new build's spelling, which a manifest may name
+        }
+    }
+
+    /// Unpacks `archive` into `destination`, touching what is there only once every entry
+    /// is in, and then keeping the files the archive does not have. `progress` gets the
+    /// bytes written so far and the total; `staged` sees the whole unpacked archive first,
+    /// on its own, and may add to it.
     @discardableResult
     static func unpack(_ archive: URL, to destination: URL,
-                       progress: (UInt64, UInt64) -> Void = { _, _ in }) throws -> UInt64 {
+                       progress: (UInt64, UInt64) -> Void = { _, _ in },
+                       staged: (URL) throws -> Void = { _ in }) throws -> UInt64 {
         let list = try entries(archive)
         let total = list.reduce(UInt64(0)) { $0 + $1.size }
         let fm = FileManager.default
@@ -185,8 +243,8 @@ enum ItchArchive {
                 done += entry.size
                 progress(done, total)
             }
-            if fm.fileExists(atPath: destination.path) { try fm.removeItem(at: destination) }
-            try fm.moveItem(at: staging, to: destination)
+            try staged(staging)
+            try install(staging, at: destination)
         } catch {
             try? fm.removeItem(at: staging)
             throw error
@@ -262,7 +320,7 @@ enum ItchArchive {
 // MARK: .7z (itch_7z.c)
 
 // A .7z unpacks the way a .zip does: the same name checks (a symbolic link stops it
-// too), every file CRC-checked, into a staging folder that replaces the destination
+// too), every file CRC-checked, into a staging folder that goes over the destination
 // only when every file is in. The decoding is itch_7z.c's, a folder at a time as a
 // stream, so a solid archive of several GB never sits in memory.
 
@@ -335,11 +393,12 @@ extension ItchArchive {
         return Unmanaged<SevenZipOutput>.fromOpaque(context).takeUnretainedValue().handle(event, item, data, length)
     }
 
-    /// Unpacks the .7z `archive` into `destination`, replacing what was there only once
-    /// every file is in. `progress` gets the bytes written so far and the total.
+    /// Unpacks the .7z `archive` into `destination` as `unpack` does a .zip. `progress`
+    /// gets the bytes written so far and the total.
     @discardableResult
     static func unpack7z(_ archive: URL, to destination: URL,
-                         progress: @escaping (UInt64, UInt64) -> Void = { _, _ in }) throws -> UInt64 {
+                         progress: @escaping (UInt64, UInt64) -> Void = { _, _ in },
+                         staged: (URL) throws -> Void = { _ in }) throws -> UInt64 {
         var opened: OpaquePointer?
         let reasonSize = 64
         var reason = [CChar](repeating: 0, count: reasonSize)
@@ -384,8 +443,8 @@ extension ItchArchive {
             if let failure = output.failure { throw failure }
             guard result == Int32(I7Z_OK) else { throw sevenZipError(result, String(cString: reason)) }
             progress(total, total)
-            if fm.fileExists(atPath: destination.path) { try fm.removeItem(at: destination) }
-            try fm.moveItem(at: staging, to: destination)
+            try staged(staging)
+            try install(staging, at: destination)
         } catch {
             try? fm.removeItem(at: staging)
             throw error
@@ -395,9 +454,10 @@ extension ItchArchive {
 
     /// Unpacks a .zip or .7z by its contents; nil when it is neither.
     static func unpackAny(_ archive: URL, to destination: URL,
-                          progress: @escaping (UInt64, UInt64) -> Void = { _, _ in }) throws -> UInt64? {
-        if isZip(archive) { return try unpack(archive, to: destination, progress: progress) }
-        if is7z(archive) { return try unpack7z(archive, to: destination, progress: progress) }
+                          progress: @escaping (UInt64, UInt64) -> Void = { _, _ in },
+                          staged: (URL) throws -> Void = { _ in }) throws -> UInt64? {
+        if isZip(archive) { return try unpack(archive, to: destination, progress: progress, staged: staged) }
+        if is7z(archive) { return try unpack7z(archive, to: destination, progress: progress, staged: staged) }
         return nil
     }
 

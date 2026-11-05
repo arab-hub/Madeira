@@ -95,7 +95,10 @@ struct EpicInstalledGame: Codable, Sendable {
     private let api = EpicAPI.shared
     private let downloader = EpicDownloader()
 
-    private init() { loadInstalled() }
+    private init() {
+        Self.removeOwnershipTokens()   // what a killed session left behind; this runs before any launch can write one
+        loadInstalled()
+    }
 
     var hasActiveDownload: Bool { downloads.values.contains { $0.state == .active || $0.state == .queued } }
     func game(_ app: String) -> EpicOwnedGame? { owned.first { $0.appName == app } }
@@ -104,6 +107,16 @@ struct EpicInstalledGame: Codable, Sendable {
 
     static var drive: URL { LibraryModel.drive }
     static let installRoot = "Program Files/Epic Games"
+    /// Deletes the ownership tokens launchArguments writes for a game to read (-epicovt=),
+    /// in drive_c, which the Files app can see. A game reads its token while it starts, and
+    /// again if it restarts itself, so it stays until the session ends (LibraryModel.finish).
+    nonisolated static func removeOwnershipTokens() {
+        let fm = FileManager.default
+        let folder = LibraryModel.drive.appendingPathComponent("madeira-games", isDirectory: true)
+        for name in (try? fm.contentsOfDirectory(atPath: folder.path)) ?? [] where name.hasPrefix("epic-") && name.hasSuffix(".ovt") {
+            try? fm.removeItem(at: folder.appendingPathComponent(name))
+        }
+    }
     private static var support: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Madeira", isDirectory: true)
@@ -197,6 +210,7 @@ struct EpicInstalledGame: Codable, Sendable {
         for app in Array(downloads.keys) { pause(app) }
         Task { await api.signOut() }
         try? FileManager.default.removeItem(at: Self.cacheURL)
+        if !inSession { Self.removeOwnershipTokens() }   // a running game's goes when its session ends
         signedIn = false; accountName = nil; accountID = nil; owned = []; libraryUpdated = nil
     }
 
@@ -342,6 +356,7 @@ struct EpicInstalledGame: Codable, Sendable {
         installed[app] = nil
         writeInstalled()
         LibraryModel.shared.removeEpic(appName: app)
+        Self.removeOwnershipTokens()
         let folder = Self.drive.appendingPathComponent(record.folder, isDirectory: true)
         let manifest = Self.manifestURL(app), journal = Self.journalURL(app)
         Task.detached(priority: .utility) {
@@ -488,6 +503,7 @@ struct EpicInstalledGame: Codable, Sendable {
     /// a game Epic marks as playable offline starts without the code.
     func launchArguments(appName app: String) async throws -> String {
         guard let record = installed[app] else { throw EpicAPIError.invalid("not-installed") }
+        Self.removeOwnershipTokens()   // the last launch's, also when this one is offline and writes none
         var code = ""
         var ownershipFile: String?
         do {
