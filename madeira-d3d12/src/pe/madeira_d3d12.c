@@ -1251,7 +1251,7 @@ DEFINE_GUID(IID_IMTLDXGIDevice, 0x6bfa1657, 0x9cb1, 0x471a, 0xa4, 0xfb, 0x7c, 0x
 /* ml1300: not in the toolchain's d3d12.h (it ends at List7); value from Microsoft's DirectX-Headers d3d12.idl */
 DEFINE_GUID(IID_ID3D12GraphicsCommandList8, 0xee936ef9, 0x599d, 0x4d28, 0x93, 0x8e, 0x23, 0xc4, 0xad, 0x05, 0xce, 0x51);
 
-#define MAD_ROOT_PARAM_MAX 32
+#define MAD_ROOT_PARAM_MAX 64   /* D3D12's own limit: a root signature costs at most 64 DWORDs and a table costs one. Was 32, which refused Cyberpunk 2077's 36-parameter signature (2026-11-05). */
 #define MAD_ROOT_RANGE_MAX 32        /* ml1009: the OLD fixed cap; now only a log reference */
 #define MAD_ROOT_RANGE_SANE 8192     /* ml1009: refuse-a-corrupt-blob bound, not a capability limit */
 /* The parsed root signature, not the blob. The converter needs the layout at
@@ -1471,7 +1471,7 @@ static void mad_pl_del(struct mad_memheap *h, struct mad_resource *r);
 struct mad_device;
 static void mad_mheap_reclaim(struct mad_device *d, int all);   /* ml1148 */
 struct mad_rootsig;
-static UINT mad_root_layout(const struct mad_rootsig *rs, UINT offsets[32]);
+static UINT mad_root_layout(const struct mad_rootsig *rs, UINT offsets[MAD_ROOT_PARAM_MAX]);
 static int mad_tiled_on(void);   /* d3d12-tiled-resources (opt-in), see TILED RESOURCES */
 
 static HRESULT mad_creation_failure(struct mad_device *d, const char *what) {
@@ -1921,7 +1921,7 @@ struct mad_cmd {
 };
 
 #define MAD_ARG_RING_BYTES  (64u * 1024u)
-#define MAD_ARG_SLOT_BYTES  1088u  /* up to 64 dwords of root constants plus 32 root arguments, then ml912 draw params, then the ml927 vertex-buffer table */
+#define MAD_ARG_SLOT_BYTES  1088u  /* up to 64 dwords of root constants plus root arguments (64 tables x 8 bytes also fit the 512 before the draw params), then ml912 draw params, then the ml927 vertex-buffer table */
 #define MAD_ARG_DRAWPARAMS_OFF 512u /* IRRuntimeDrawParams (20 bytes) at kIRArgumentBufferDrawArgumentsBindPoint */
 #define MAD_ARG_DRAWINFO_OFF   544u /* IRRuntimeDrawInfo (24 bytes; first uint16 = index type) at kIRArgumentBufferUniformsBindPoint */
 #define MAD_ARG_VBTABLE_OFF    576u /* ml927: IRRuntimeVertexBuffers (31 x {addr, length, stride} = 496 bytes) at kIRVertexBufferBindPoint, object stage */

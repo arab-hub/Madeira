@@ -28,7 +28,7 @@
 
 /* What the extracted regions expect from the rest of the runtime. The bounds
  * must match the runtime's (MAD_ROOT_PARAM_MAX / MAD_ROOT_RANGE_SANE). */
-#define MAD_ROOT_PARAM_MAX 32
+#define MAD_ROOT_PARAM_MAX 64
 #define MAD_ROOT_RANGE_SANE 8192
 static int g_quiet;
 static void d3d12_log(const char *fmt, ...) {
@@ -420,7 +420,7 @@ int main(void) {
             { 44 + 0,  3,          E_NOTIMPL,    "version 1.2" },
             { 44 + 0,  7,          E_INVALIDARG, "unknown version" },
             { 44 + 0,  0,          E_INVALIDARG, "version 0" },
-            { 44 + 4,  33,         E_NOTIMPL,    "too many parameters" },
+            { 44 + 4,  65,         E_NOTIMPL,    "too many parameters" },
             { 44 + 4,  0x7fffffff, E_NOTIMPL,    "absurd parameter count" },
             { 44 + 12, 33,         E_NOTIMPL,    "too many samplers" },
             { 44 + 8,  0xfffffff0, E_INVALIDARG, "parameter offset out of range" },
