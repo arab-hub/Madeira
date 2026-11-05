@@ -9,7 +9,7 @@ How to read: read CORE, then only the Index categories the task touches. Grep `^
 | Build | CI branches, cache keys, Official build versus CI |
 | Safety | Shared setups, deleting game files |
 | Performance | Default changes and their switches |
-| Games | Per-game configs, JIT pool size |
+| Games | Per-game configs, JIT pool size, Address space budget, Cyberpunk 2077 |
 
 # CORE
 
@@ -68,3 +68,15 @@ A game's own config is `Library/Application Support/GameConfigs/<FNV-1a 64 of th
 ## JIT pool size
 
 A single pool region cannot pass about 880 MB: it must sit below `0x180000000`, above the 128 MB executable window. `pool = 1152` without `pool-split = 1` always shrinks. When anything is mapped just above the window at image load, the early placeholder fails and the pool drops below 500 MB. Big 64-bit games then need `pool-split = 1` (Cyberpunk 2077, 2026-11-05: 464 MB pool, libxess failed with c0000017; 880 MB with it). `env.MADEIRA_X64_IMAGE_NOCOPY = 1` crashed Cyberpunk's REDprelauncher.exe in PocoFoundation.dll, so test it per game.
+
+## Address space budget
+
+iOS gives about 60 GB a program can use: `0x7038004000-0x71ffe00000` (7 GB) and `0x73ffff0000-0x8000000000` (48 GB). `0x1000000000-0x7000000000` is the GPU carveout, even with the extended-virtual-addressing entitlement (the map is already 512 GB). The emulator arena takes 16 GB of the top (`arena-mb = 8192` gives 8 GB; FEX used about 2 GB in Cyberpunk). The 32-bit cage holds `0x7200000000+8 GB` until it is handed out.
+
+A game that reserves more than fits gets `oversize-reserve`: a real part and an unmapped rest. Everything else then lives inside that rest unless `oversize-reserve-top = 1` puts the real part against `0x8000000000`. Use top placement with `arena-mb`, so the arena is not inside the rest either. `[oversize] ml1298 commit ... N MB into the reserve` then lists only the game's own commits; the deepest N is the real part it needs.
+
+The fault handler in `signal_arm64_ios.c` repairs emulator pages (restore R|X, zero-fill) only inside the published arena (`ios_in_fex_arena`), not the fixed hardware band, so a moved arena does not hide the game's access violations.
+
+## Cyberpunk 2077
+
+Reserves 16 GB, 64 GB, 32 GB (fails, falls back to 2 x 1 GB), then five 4 GB pools and more 1 GB ones: about 103 GB, against 55 GB free. Budgets follow the reported RAM (`totalphys`): at 6 GB the load ran out of memory (CrashInfo.json `isOom`), at 12 GB Wwise failed (`wwiseAllocator.cpp`: "Those allocations are not expected to ever need reallocation", and a lost wake-up of `AK::IOThread` at start-up). Its crash files are `users/mobile/AppData/Local/CD Projekt Red/Cyberpunk 2077/CrashInfo.json` and `REDEngine/ReportQueue`. `REDEngineErrorReporter.exe` starts 10 s into every launch and waits; it is not a crash by itself.
