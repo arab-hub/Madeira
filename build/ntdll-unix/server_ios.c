@@ -3462,8 +3462,8 @@ void ios_frame_pass( unsigned kind, unsigned loads, unsigned stores, unsigned cl
     IOS_FR_ADD( ios_fr_att[0], loads ); IOS_FR_ADD( ios_fr_att[1], stores ); IOS_FR_ADD( ios_fr_att[2], clears );
 }
 
-/* madeira-bcd lean-diag: env.MADEIRA_LEAN_DIAG = 1 (opt-in, read once where the
- * samplers are armed). The periodic diagnostics that suspend threads stop: the
+/* madeira-bcd lean-diag: on by default, env.MADEIRA_LEAN_DIAG = 0 restores the samplers
+ * (read once where the samplers are armed). The periodic diagnostics that suspend threads stop: the
  * [thread-sample] bursts (every thread suspended 4x every 20 s), the guest RIP
  * profile behind [rip-profile]/[cpu-split] (the game's threads suspended ~2,400
  * times in the second after each burst, by a utility-QoS thread that can be
@@ -3471,7 +3471,9 @@ void ios_frame_pass( unsigned kind, unsigned loads, unsigned stores, unsigned cl
  * keeps its 20 s line and [xp]/[xp-t]/[xp-api]/[xp-api-top] keep their rates, so
  * abline, bucket, xptphase, energyfit, clampstats and apitop read the same
  * fields; tstime has no [thread-sample] lines to tag. The memory walks of
- * virtual_ios.c's warmer thread run every ~10 min instead of every minute. */
+ * virtual_ios.c's warmer thread run every ~10 min instead of every minute only when the
+ * switch is set to 1: unset, they keep their rates. The stuck-store check below is a fix
+ * rather than a diagnostic and runs either way (MADEIRA_STUCK_CHECK=0 turns it off). */
 static int ios_lean_diag;
 
 /* ml1288: stuck page-crossing store detector, ml1292: and its fix (Ori and the
@@ -3662,7 +3664,7 @@ static void ios_thread_sampler_main(void)
         for (tick = 0; tick < 200; tick++)   /* ml1288: the stuck-store check every 100 ms between bursts */
         {
             usleep( 100000 );
-            if (stuck_check && !ios_lean_diag) ios_stuck_store_check();
+            if (stuck_check) ios_stuck_store_check();
         }
         if (!ios_lean_diag) {
         for (b = 0; b < 4; b++) { ios_thread_sampler_pass(b); usleep(250000); }
@@ -3699,6 +3701,19 @@ static void ios_thread_sampler_main(void)
          * successive profiles are what distinguish a loop from a sweep: a
          * sweep's span and bucket set move, a loop's do not. */
         if (!ios_lean_diag) { ++gen; ios_guest_rip_profile( gen ); }   /* ml1123: every burst (was every third) */
+    }
+}
+
+/* MADEIRA_PROBES=light starts no thread sampler, which is what runs the stuck-store check:
+ * the check alone, on the same 100 ms. MADEIRA_PROBES=0 starts neither. */
+static void ios_stuck_store_main(void)
+{
+    const char *sc = getenv( "MADEIRA_STUCK_CHECK" );
+    if (sc && sc[0] == '0') return;
+    for (;;)
+    {
+        usleep( 100000 );
+        ios_stuck_store_check();
     }
 }
 
@@ -5622,6 +5637,10 @@ void process_exit_wrapper( int status )
         ios_retire_own_fixed_base_image( dead_peb );
         ios_fdt_note_close( ios_proc_sockets[i].fd, "exit-master", dead_peb );
         close( ios_proc_sockets[i].fd );
+        {   /* madeira-bcd doorbell: a process socket has no bell; a ring without a thread id asks for a full scan now (fd_ios.c) */
+            extern void ios_wineserver_ring( unsigned int tid );
+            ios_wineserver_ring( 0 );
+        }
         ios_proc_sockets[i].peb = NULL;
         {   /* Madeira child-exit: this child's process ended; its slot in process_ios.c must not keep a session alive */
             extern void ios_child_slot_exited( void *peb );
@@ -6891,21 +6910,23 @@ void server_init_process_done(void)
              * device whose efficiency cores are saturated (a heavy game at 1080p). */
             const char *probes_env = getenv("MADEIRA_PROBES");
             int probes = !probes_env || !*probes_env ? 2 : !strcmp(probes_env, "0") ? 0 : !strcmp(probes_env, "light") ? 1 : 2;
-            /* 1: no thread-suspending samplers ([thread-sample], [rip-profile], [cpu-split], [wprof]) and rare memory walks; [xp] unchanged */
+            /* on by default, 0 restores them: no thread-suspending samplers ([thread-sample], [rip-profile], [cpu-split], [wprof]); 1 also rare memory walks; [xp] unchanged */
             const char *lean_env = getenv("MADEIRA_LEAN_DIAG");
             /* 1: a [power] line every 5 s (coalition GPU energy, IOReport, battery) and [power-t] (energy per thread) */
             const char *probe_env = getenv("MADEIRA_POWER_PROBE");
-            ios_lean_diag = lean_env && *lean_env && strcmp(lean_env, "0") != 0;
+            ios_lean_diag = !lean_env || !*lean_env || strcmp(lean_env, "0") != 0;
             ios_power_probe_on = probe_env && *probe_env && strcmp(probe_env, "0") != 0;
             if (probes < 2)
                 wine_log_write("[probes] MADEIRA_PROBES=%s: thread sampler, guest RIP profile and W-thread profiler off%s",
-                               probes_env, probes ? "; [xp] counters stay" : "; [xp] counters off too");
+                               probes_env, probes ? "; [xp] counters and the stuck-store check stay" : "; [xp] counters and the stuck-store check off too");
             if (ios_lean_diag)
                 wine_log_write("[lean-diag] madeira-bcd MADEIRA_LEAN_DIAG=%s: [thread-sample] bursts, guest RIP profile ([rip-profile], "
-                               "[cpu-split]) and [wprof] off; [sync-census] every 20 s and [xp]/[xp-t]/[xp-api] every 250 ms / 1 s as "
-                               "before; the warmer's memory walks every ~10 min", lean_env);
+                               "[cpu-split]) and [wprof] off (0 restores them); [sync-census] every 20 s and [xp]/[xp-t]/[xp-api] every "
+                               "250 ms / 1 s as before; the warmer's memory walks every ~10 min only with 1",
+                               lean_env && *lean_env ? lean_env : "default");
             ios_frame_stats_arm();   /* [frame]: off unless MADEIRA_FRAME_STATS is set */
             if (probes >= 2) dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ ios_thread_sampler_main(); });
+            else if (probes >= 1) dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ ios_stuck_store_main(); });
             if (probes >= 1) dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ ios_xprobe_main(); });   /* ml1128 */
             if (probes >= 2 && !ios_lean_diag) dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ ios_wprof_main(); });   /* ml1129 */
         }

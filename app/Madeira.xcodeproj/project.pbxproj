@@ -19,7 +19,7 @@
 		A1000531 /* SteamGames.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000531 /* SteamGames.swift */; };
 		A1007B02 /* SwiftItch/ItchAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2007B02 /* ItchAPI.swift */; };
 		A1007B03 /* SwiftItch/ItchArchive.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2007B03 /* ItchArchive.swift */; };
-		A1007B30 /* SwiftItch/itch_7z.c in Sources */ = {isa = PBXBuildFile; fileRef = A2007B30 /* itch_7z.c */; };
+		A1007B30 /* SwiftItch/itch_7z.c in Sources */ = {isa = PBXBuildFile; fileRef = A2007B30 /* itch_7z.c */; settings = {COMPILER_FLAGS = "-O2"; }; };
 		A1007B04 /* ItchLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2007B04 /* ItchLibrary.swift */; };
 		A1007B05 /* ItchGames.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2007B05 /* ItchGames.swift */; };
 		A1006A01 /* GOGLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2006A01 /* GOGLibrary.swift */; };
@@ -60,7 +60,7 @@
 		A1000E05 /* SwiftEpic/EpicDownloader.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000E05 /* EpicDownloader.swift */; };
 		A1000715 /* DockGameSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000715 /* DockGameSession.swift */; };
 		A1000712 /* VCRedist.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000712 /* VCRedist.swift */; };
-		A1000713 /* CabinetReader.c in Sources */ = {isa = PBXBuildFile; fileRef = A2000713 /* CabinetReader.c */; };
+		A1000713 /* CabinetReader.c in Sources */ = {isa = PBXBuildFile; fileRef = A2000713 /* CabinetReader.c */; settings = {COMPILER_FLAGS = "-O2"; }; };
 		A10007A1 /* SettingsPages.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20007A1 /* SettingsPages.swift */; };
 		A1000602 /* SteamDownloadBackground.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000602 /* SteamDownloadBackground.swift */; };
 		A1008B01 /* BackgroundRun.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2008B01 /* BackgroundRun.swift */; };
@@ -70,9 +70,9 @@
 		A1000660 /* SwiftSteam/Content/SteamLANPeer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000660 /* SteamLANPeer.swift */; };
 		A100060B /* SwiftSteam/Content/DepotManifest.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200060B /* DepotManifest.swift */; };
 		A100060E /* SwiftSteam/Install/AppManifestWriter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200060E /* AppManifestWriter.swift */; };
-		A100060F /* SwiftSteam/chunk_zip.c in Sources */ = {isa = PBXBuildFile; fileRef = A200060F /* chunk_zip.c */; };
-		A1000610 /* SwiftSteam/lzma_shim.c in Sources */ = {isa = PBXBuildFile; fileRef = A2000610 /* lzma_shim.c */; };
-		A1000611 /* SwiftSteam/zstd_edu.c in Sources */ = {isa = PBXBuildFile; fileRef = A2000611 /* zstd_edu.c */; };
+		A100060F /* SwiftSteam/chunk_zip.c in Sources */ = {isa = PBXBuildFile; fileRef = A200060F /* chunk_zip.c */; settings = {COMPILER_FLAGS = "-O2"; }; };
+		A1000610 /* SwiftSteam/lzma_shim.c in Sources */ = {isa = PBXBuildFile; fileRef = A2000610 /* lzma_shim.c */; settings = {COMPILER_FLAGS = "-O2"; }; };
+		A1000611 /* SwiftSteam/zstd_edu.c in Sources */ = {isa = PBXBuildFile; fileRef = A2000611 /* zstd_edu.c */; settings = {COMPILER_FLAGS = "-O2"; }; };
 		A1000603 /* SwiftSteam/Core/CMServerList.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000603 /* CMServerList.swift */; };
 		A1000604 /* SwiftSteam/Core/LicenseListBox.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000604 /* LicenseListBox.swift */; };
 		A1000605 /* SwiftSteam/Core/SteamConnection.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000605 /* SteamConnection.swift */; };
@@ -139,7 +139,7 @@
 		B1000014 /* ExtensionFoundation.framework in Helper Frameworks */ = {isa = PBXBuildFile; fileRef = B2000010 /* ExtensionFoundation.framework */; };
 		B1000016 /* MadeiraJITHelper.appex in Embed JIT Helper */ = {isa = PBXBuildFile; fileRef = B2000022 /* MadeiraJITHelper.appex */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		A1000040 /* prefix-template.tar.gz in Resources */ = {isa = PBXBuildFile; fileRef = A2000040 /* prefix-template.tar.gz */; };
-		A1000041 /* PrefixExtractor.c in Sources */ = {isa = PBXBuildFile; fileRef = A2000041 /* PrefixExtractor.c */; };
+		A1000041 /* PrefixExtractor.c in Sources */ = {isa = PBXBuildFile; fileRef = A2000041 /* PrefixExtractor.c */; settings = {COMPILER_FLAGS = "-O2"; }; };
 		A1000042 /* libz.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000042 /* libz.tbd */; };
 		A1000050 /* IOSDisplayShim.m in Sources */ = {isa = PBXBuildFile; fileRef = A2000050 /* IOSDisplayShim.m */; };
 		A1000051 /* libdxmt_combined.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000051 /* libdxmt_combined.a */; };

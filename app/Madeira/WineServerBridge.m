@@ -47,6 +47,13 @@ extern void wineserver_log_set_file(const char *path);
 // Set NLS directory for wineserver (defined in unicode_ios.c)
 extern void wineserver_set_nls_dir(const char *path);
 
+static volatile int g_wineserver_running = 0;
+static pthread_t g_wineserver_self;   // set by the server thread itself, so fatal_error can tell it is on it
+
+// The first fatal error's message (wineserver_fatal_message); published by the flag.
+static char g_wineserver_fatal[1024];
+static volatile int g_wineserver_fatal_set = 0;
+
 // Override wineserver's fatal_error to use logging and pthread_exit instead of exit(1)
 void fatal_error( const char *err, ... ) {
     va_list args;
@@ -55,6 +62,22 @@ void fatal_error( const char *err, ... ) {
     vsnprintf(buf, sizeof(buf), err, args);
     va_end(args);
     wine_log_msg_impl("[Wine] FATAL: %s", buf);
+    // The app ends the session on this; the running flag below would otherwise stay
+    // set, because the thread never gets back to wineserver_thread_func.
+    if (!__atomic_load_n(&g_wineserver_fatal_set, __ATOMIC_ACQUIRE)) {
+        size_t n = strlen(buf);
+        while (n && (buf[n - 1] == '\n' || buf[n - 1] == '\r')) buf[--n] = 0;
+        memcpy(g_wineserver_fatal, buf, n + 1);
+        __atomic_store_n(&g_wineserver_fatal_set, 1, __ATOMIC_RELEASE);
+    }
+    // A fatal error in the loop (a registry save's fchdir) holds ios_srv_lock with
+    // MADEIRA_SRV_DIRECT on: let it go, or client threads would wait on a dead owner.
+    // No listed direct request reaches a fatal_error, so this is the server thread.
+    if (pthread_equal(pthread_self(), g_wineserver_self)) {
+        extern void ios_srv_fatal_unlock(void);
+        ios_srv_fatal_unlock();
+    }
+    g_wineserver_running = 0;
     // Don't call exit(1) — that kills the whole app.
     // Instead, terminate just this thread.
     pthread_exit(NULL);
@@ -68,10 +91,10 @@ extern int debug_level;
 volatile int g_wineserver_should_stop = 0;
 
 static pthread_t g_wineserver_thread;
-static volatile int g_wineserver_running = 0;
 static char *g_prefix_path = NULL;
 
 static void *wineserver_thread_func(void *arg) {
+    g_wineserver_self = pthread_self();
     @autoreleasepool {
         // Set up file-based logging
         NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
@@ -155,6 +178,7 @@ int wineserver_start(const char *prefix_path) {
         extern int wineserver_ready;
         __atomic_store_n(&wineserver_ready, 0, __ATOMIC_RELEASE);
     }
+    __atomic_store_n(&g_wineserver_fatal_set, 0, __ATOMIC_RELEASE);
     g_wineserver_running = 1;
 
     /* 2026-07-04 perf: the wineserver thread used to be created at LOWERED
@@ -190,6 +214,26 @@ int wineserver_is_running(void) {
 int wineserver_is_ready(void) {
     extern int wineserver_ready;
     return __atomic_load_n(&wineserver_ready, __ATOMIC_ACQUIRE);
+}
+
+const char *wineserver_fatal_message(void) {
+    return __atomic_load_n(&g_wineserver_fatal_set, __ATOMIC_ACQUIRE) ? g_wineserver_fatal : NULL;
+}
+
+void wineserver_flush_for_exit(void) {
+    // Never started, already stopped, or ended on a fatal error: nothing to wait for.
+    if (!g_wineserver_running) return;
+    wine_log_msg("Wineserver flush for exit requested");
+    g_wineserver_should_stop = 1;
+    // Out of its sleep at once (a no-op before the loop has its semaphore). The loop checks
+    // the flag at the top of every pass and main_ios.c saves the registry when it ends.
+    extern void ios_wineserver_wake(void);
+    ios_wineserver_wake();
+    // Poll only: no join and no ios_srv_lock, so a client thread stuck under that lock, or
+    // the loop waiting for it, costs this caller the 500 ms and nothing more.
+    uint64_t deadline = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) + 500000000ull;
+    while (g_wineserver_running && clock_gettime_nsec_np(CLOCK_UPTIME_RAW) < deadline) usleep(2000);
+    wine_log_msg("Wineserver flush for exit: %s", g_wineserver_running ? "still running after 500 ms" : "stopped");
 }
 
 void wineserver_stop(void) {

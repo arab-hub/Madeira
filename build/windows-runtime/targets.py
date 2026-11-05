@@ -32,7 +32,8 @@ def targets(arch, names=None):
     for dest in sorted(farm / name for name in names):
         name = dest.name.lower()
         dxmt = DXMT if arch == 'arm64ec' else {'d3d11.dll', 'dxgi.dll', 'winemetal.dll'}
-        if name in dxmt | CUSTOM or (arch == 'arm64ec' and name in {'d3d12.dll', 'd3d12core.dll'}):
+        # dcomp.dll is build/dcomp's, committed in the farm: Wine's own (E_NOTIMPL) must not replace it.
+        if name in dxmt | CUSTOM or (arch == 'arm64ec' and name in {'d3d12.dll', 'd3d12core.dll', 'dcomp.dll'}):
             continue
         source = 'd3d9.dll' if name == 'd3d9-wined3d.dll' else name
         if source not in modules:

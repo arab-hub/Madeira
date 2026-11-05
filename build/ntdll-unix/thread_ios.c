@@ -1135,6 +1135,14 @@ static DECLSPEC_NORETURN void pthread_exit_wrapper( int status )
     close( ntdll_get_thread_data()->wait_fd[1] );
     close( ntdll_get_thread_data()->reply_fd );
     close( ntdll_get_thread_data()->request_fd );
+    {
+        /* madeira-bcd doorbell: the EOF on the request fd is how the server learns this
+         * thread ended (read_request). Have it read this fd now, not at the next full scan
+         * (fd_ios.c ios_srv_bell): atomics and a semaphore signal, nothing of this thread's
+         * but its id; a thread the server has already dropped is a lookup that finds nothing. */
+        extern void ios_wineserver_ring( unsigned int tid );
+        ios_wineserver_ring( HandleToULong( NtCurrentTeb()->ClientId.UniqueThread ) );
+    }
     /* iOS-Madeira (Steam S0): we write the TEB directly into TSD slot 275
      * (start_thread above) because FEX hardcodes offset 0x898 — but we
      * don't OWN dynamic key 275. If an Apple framework allocated that key

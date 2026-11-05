@@ -82,8 +82,11 @@ void ios_wineserver_wake(void)
  * be read. Now a client sets its thread id's bit here after writing a request
  * and before it wakes the loop; each pass reads the request fds of the rung
  * threads only, and the read() of every client fd (thread exits, process
- * sockets, anything without a bell) runs every MADEIRA_SRV_FULLSCAN_MS (10 by
- * default) or at once when a ring carried no usable thread id. Nothing is
+ * sockets, anything without a bell) runs every MADEIRA_SRV_FULLSCAN_MS (50 by
+ * default) or at once when a ring carried no usable thread id. A thread that ends
+ * rings after closing its request fd (thread_ios.c pthread_exit_wrapper) and a
+ * process that ends asks for a full scan (server_ios.c process_exit_wrapper), so
+ * neither waits for the period. Nothing is
  * lost: a bit set after the loop took the words is seen on the next pass,
  * which the wake guarantees, and a request still partly unread is rung again
  * by the loop. MADEIRA_SRV_DOORBELL=0 restores the read() of every client fd
@@ -230,6 +233,14 @@ static void ios_srv_loop_exit(void)
     ios_srv_loop_leave();
     ios_srv_qos_set = 0;
     ios_srv_qos_follow_seen = ios_srv_qos_gen_seen = 0;
+}
+
+/* WineServerBridge.m fatal_error, on the server thread: it ends without reaching the loop's
+ * exit, so do that part here. A client thread waiting for ios_srv_lock then finds direct
+ * requests off and goes through its pipe. */
+void ios_srv_fatal_unlock(void)
+{
+    ios_srv_loop_exit();
 }
 
 /* __WINESRC__ must be defined via -D flag so unicode_fix.h can see it */
@@ -1555,7 +1566,7 @@ void main_loop(void)
         static int ios_post_inject = 0;  /* trace first N iters after injection */
         static int ios_client_fd_start = -1;  /* first poll index added by injection */
         static int ios_doorbell = 0;                     /* madeira-bcd: see ios_srv_bell */
-        static unsigned long long ios_fullscan_ns = 10000000ull;
+        static unsigned long long ios_fullscan_ns = 50000000ull;
         unsigned long long ios_last_full = 0, ios_full_n = 0, ios_pass_n = 0;
         unsigned long long ios_db_report = 0;
         unsigned long long ios_last_slow = 0, ios_slow_n = 0;
@@ -1580,8 +1591,8 @@ void main_loop(void)
                    ios_srv_wake_coalesce ? "on" : "off");
             {
                 char dbb[16], fsb[16]; const char *db = ios_srv_switch( "MADEIRA_SRV_DOORBELL", dbb, sizeof(dbb) );  /* 0: read every client fd on every pass, as before */
-                const char *fs = ios_srv_switch( "MADEIRA_SRV_FULLSCAN_MS", fsb, sizeof(fsb) );  /* ms between reads of every client fd with the doorbell on (default 10) */
-                long ms = fs && *fs ? strtol( fs, NULL, 10 ) : 10;
+                const char *fs = ios_srv_switch( "MADEIRA_SRV_FULLSCAN_MS", fsb, sizeof(fsb) );  /* ms between reads of every client fd with the doorbell on (default 50) */
+                long ms = fs && *fs ? strtol( fs, NULL, 10 ) : 50;
                 if (ms < 1) ms = 1;
                 if (ms > 1000) ms = 1000;
                 ios_doorbell = !(db && db[0] == '0' && !db[1]);

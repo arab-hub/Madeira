@@ -816,15 +816,24 @@ enum GameRecommendations {
     /// DynamicBuffer lock with three waiters, and two threads then crashed in DXMT;
     /// stamped reaps only locks of threads that are gone, as for Horizon Zero Dawn.
     /// The game looks for a controller only at start, as Dark Souls: Remastered.
-    /// With these, combat holds 16-20 fps.
+    /// Version 2: thread classes, and the DXMT and sync switches. Measured on an iPhone
+    /// Air (iOS 27.2) in heavy scenes ([gpu-perf] windows over 300 draws a frame): median
+    /// 21.5 -> 36.7 fps, p10 15.2 -> 28.8, 32-34 fps once thermally throttled. The numbers
+    /// are from one combined run of all five switches, against a baseline that already had
+    /// MADEIRA_CS_X64 (not in this list), so no switch's own share is known.
     static let darkSoulsIII = GameRecommendation(
-        id: "dark-souls-iii", title: "Dark Souls III", version: 1,
+        id: "dark-souls-iii", title: "Dark Souls III", version: 2,
         config: """
         # Madeira's recommended settings for Dark Souls III.
         # Reset to Recommended, at the bottom of the game's settings, brings them back.
         pool-split = 1
         env.MADEIRA_X64_IMAGE_NOCOPY = 1
         env.MADEIRA_LOCK_ORPHAN = stamped
+        env.MADEIRA_THREAD_QOS = GXWorker*=user-initiated;FD4JobWorker*=utility;Core.Res.*=utility;EzWorkPool*=utility;Bnd4FSAsync*=utility;NexusRevolution*=utility;HkAiThread*=utility;CSChrBackInitialize*=utility;FaceGenMan*=utility
+        env.DXMT_DYN_KEEP = 1024
+        env.DXMT_CMDLIST_KEEP_BLOCK = 1
+        env.MADEIRA_TLS_X64 = 1
+        env.MADEIRA_SYNC_LEAN = 1
         env.MADEIRA_PAD_EARLY_SLOT = 1
         env.MADEIRA_CONTROLS_XBOX_DEFAULT = 1
         env.MADEIRA_EC_HOOK_TRACE = 0

@@ -70,5 +70,10 @@ int wineserver_main(int argc, char *argv[])
     ws_log("[wineserver] entering main_loop!");
     main_loop();
     ws_log("[wineserver] main_loop returned");
+    /* The periodic save may be up to its period behind and iOS gives a stopping server no
+     * other chance (ml1310). The loop has ended direct requests (ios_srv_loop_exit), so
+     * nothing else touches the registry; a save skips branches that have not changed. */
+    flush_registry();
+    ws_log("[wineserver] registry saved");
     return 0;
 }

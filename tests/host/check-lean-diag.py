@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""lean-diag: env.MADEIRA_LEAN_DIAG = 1 makes the periodic diagnostics cheap; no Wine runs.
+"""lean-diag: env.MADEIRA_LEAN_DIAG makes the periodic diagnostics cheap; no Wine runs.
 
 Every game session runs, by default, diagnostics that suspend threads or walk
 the whole address space (Horizon Zero Dawn, builds 486-493):
@@ -19,9 +19,14 @@ calls, then every 1000th. The owner's analysis lines keep their rates:
 [xp]/[xp-t] every 250 ms, [xp-api]/[xp-api-top] every second, [sync-census]
 every 20 s (abline, bucket, xptphase, energyfit, clampstats, apitop).
 
-Checks (unset = byte-identical behaviour):
+The samplers stop by default (unset counts as on; 0 restores them); the walks, the
+probes and the mprotect_exec line change only when the switch is set to 1.
+
+Checks:
   - the switch is read once where the samplers are armed, and [wprof] is not
     started with it;
+  - the stuck-store check does not depend on it, and runs with MADEIRA_PROBES=light
+    (a loop of its own), not with MADEIRA_PROBES=0;
   - ios_thread_sampler_main compiled on this host: without the switch 4 passes
     and one guest profile per 20 s burst, exactly as before; with it no pass,
     no profile, and both [sync-census] lines every 20 s;
@@ -100,8 +105,9 @@ arm_at = server.find("if (__sync_bool_compare_and_swap(&ios_ts_armed, 0, 1))")
 arm = server[arm_at:server.find("ios_wprof_main(); });", arm_at) + 40]
 check(arm_at > 0 and 'const char *lean_env = getenv("MADEIRA_LEAN_DIAG");' in arm,
       "MADEIRA_LEAN_DIAG is read where the samplers are armed (once a process)")
-check('ios_lean_diag = lean_env && *lean_env && strcmp(lean_env, "0") != 0;' in arm,
-      "unset, empty or 0 leaves it off")
+check('ios_lean_diag = !lean_env || !*lean_env || strcmp(lean_env, "0") != 0;' in arm,
+      "on unless it is 0 (unset and empty count as on)")
+check("lean_env && *lean_env ? lean_env :" in arm, "the [lean-diag] line never prints an unset value")
 # (a build may also gate each sampler on a probes level of its own: "if (probes >= N ...")
 check(re.search(r"if \((?:probes >= 2 && )?!ios_lean_diag\) dispatch_async\(dispatch_get_global_queue\(QOS_CLASS_UTILITY, 0\), "
                 r"\^\{ ios_wprof_main\(\); \}\);", arm),
@@ -114,6 +120,11 @@ check(re.search(r"(?:if \(probes >= 2\) )?dispatch_async\(dispatch_get_global_qu
       "the thread sampler (for [sync-census]) and the [xp] sampler start as before")
 check(server.find("static int ios_lean_diag;") < server.find("static void ios_thread_sampler_main(void)"),
       "ios_lean_diag is declared before the sampler")
+check("if (stuck_check) ios_stuck_store_check();" in func_body(server, "static void ios_thread_sampler_main(void)"),
+      "the stuck-store check does not depend on the switch")
+check("else if (probes >= 1) dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ ios_stuck_store_main(); });" in arm
+      and 'getenv( "MADEIRA_STUCK_CHECK" )' in func_body(server, "static void ios_stuck_store_main(void)"),
+      "MADEIRA_PROBES=light runs the check alone (unless MADEIRA_STUCK_CHECK=0); MADEIRA_PROBES=0 starts neither")
 
 # ---- the [xp] family does not change -----------------------------------------
 xprobe = func_body(server, "static void ios_xprobe_main( void )")

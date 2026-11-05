@@ -48,6 +48,7 @@ cases = {
     'fex-inner-recipe': ('build/fex-ios/build.sh', {'fex', 'ipa'}),
     'docs': ('BUILDING.md', {'ipa'}),
     'workflow': ('.github/workflows/build.yml', {'ipa'}),
+    'cfg-header': ('build/madeira_cfg.h', {'dxmt', 'ipa'}),
 }
 files = {path: path for path, _ in cases.values() if not path.startswith('pin:')}
 pins = {name: name for name in ['FEX', 'wine', 'dxmt']}

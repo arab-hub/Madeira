@@ -47,9 +47,10 @@ def input_key(name, sdk):
         # versioned inputs rather than part of the production DLL rebuild.
         for p in spec['prebuilt']:
             inputs[p] = digest((ROOT / 'app/Madeira' / p).read_bytes())
-        tracked = git('ls-files').splitlines()
-        inputs['farm-inventory'] = digest('\n'.join(p for p in tracked if p.startswith(
-            ('app/Madeira/arm64ec-windows/', 'app/Madeira/aarch64-windows/'))).encode())
+        # Every tracked farm file by name and committed blob: a changed binary changes the
+        # key, while a rebuilt output in the working tree (which the build writes) does not.
+        inputs['farm-inventory'] = digest(git('ls-files', '--stage', 'app/Madeira/arm64ec-windows/',
+                                              'app/Madeira/aarch64-windows/').encode())
     return digest(json.dumps([sdk, spec, inputs, pins], sort_keys=True).encode())
 
 

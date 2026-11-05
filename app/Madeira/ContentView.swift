@@ -1343,6 +1343,7 @@ struct ContentView: View {
                                                             set: { if !$0 { library.restartNotice = nil } })) {
                 Button("Close Madeira") {
                     LogStore.shared.log("[session-once] closed by the user for a restart")
+                    LibraryModel.shared.prepareForExit()
                     exit(0)
                 }
                 Button("Later", role: .cancel) { library.restartNotice = nil }
@@ -3405,6 +3406,20 @@ struct ContentView: View {
             } else {
                 Thread.sleep(forTimeInterval: 2.0)
             }
+            // Either wait can end with the server thread gone (fatal_error, WineServerBridge.m).
+            // Wine would wait forever for its first reply, so the session ends here instead.
+            if wineserver_is_running() == 0 {
+                let fatal = wineserver_fatal_message().map { String(cString: $0) }
+                let reason = "The Wine server could not start: " + (fatal ?? "it stopped without a message. Check the diagnostic log.")
+                logStore.log("[launch] Wine not started. \(reason)", level: .error)
+                DispatchQueue.main.async {
+                    ws_log_quiet = 0
+                    logStore.uiPaused = false
+                    heartbeat.invalidate()
+                    LibraryModel.shared.launchFailed(reason)
+                }
+                return
+            }
             winios_phase("wine-start")
             self.startWineProcess()
 
@@ -3442,9 +3457,14 @@ struct ContentView: View {
             var presentingSince: CFAbsoluteTime? = nil
             let pollStart = CFAbsoluteTimeGetCurrent()
             var lastHeartbeat = CFAbsoluteTimeGetCurrent()
+            var serverFatalReported = false
             while wine_process_is_running() != 0 {
                 Thread.sleep(forTimeInterval: 0.25)
                 let now = CFAbsoluteTimeGetCurrent()
+                if self.reportServerFatal() {
+                    serverFatalReported = true
+                    break
+                }
                 // Diagnostic heartbeat: 2026-07-03's detach-at-#1 run never
                 // triggered despite presents visibly counting — log what this
                 // loop actually observes so that can't happen silently again.
@@ -3490,6 +3510,12 @@ struct ContentView: View {
             DispatchQueue.main.async {
                 heartbeat.invalidate()
                 if wine_process_is_running() == 0 { LibraryModel.shared.launchFailed() }
+            }
+
+            // The loop above ends once the game is presenting; the server can still die after that.
+            while !serverFatalReported, wine_process_is_running() != 0 {
+                Thread.sleep(forTimeInterval: 1.0)
+                serverFatalReported = self.reportServerFatal()
             }
         }
     }
@@ -3831,6 +3857,25 @@ struct ContentView: View {
         } else {
             logStore.log("Failed to start Wine process (error: \(result))", level: .error)
         }
+    }
+
+    /// The server thread ended on a fatal error (WineServerBridge.m) with Wine started. Wine's
+    /// threads then wait for replies that never come, so the session cannot end by itself
+    /// (LibraryModel.poll needs Wine gone, launchFailed a process it has not seen yet): the
+    /// player gets the message and the menu's force close. True when it did.
+    private func reportServerFatal() -> Bool {
+        guard wineserver_is_running() == 0, let fatal = wineserver_fatal_message() else { return false }
+        let message = "The Wine server stopped: " + String(cString: fatal) + ". Open the menu to close Madeira."
+        logStore.log("[session] \(message)", level: .error)
+        DispatchQueue.main.async {
+            let model = LibraryModel.shared
+            guard model.current != nil else { return }
+            model.sessionMessage = message
+            model.forceCloseOffered = true
+            if model.startingScreen { model.showGameView(reason: "server-fatal") }
+            model.menu = true
+        }
+        return true
     }
 
     private func testDualMapping() {

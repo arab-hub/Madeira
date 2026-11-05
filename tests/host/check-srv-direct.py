@@ -78,7 +78,7 @@ enter = func_body(FD, "static void ios_srv_loop_enter(void)")
 leave = func_body(FD, "static void ios_srv_loop_leave(void)")
 exit_ = func_body(FD, "static void ios_srv_loop_exit(void)")
 level = func_body(REQ, "static int ios_srv_direct_level( enum request req )")
-run = func_body(REQ, "static int ios_srv_run_direct( struct thread *thread, union generic_reply *reply, void *reply_data )")
+run = func_body(REQ, "static int ios_srv_run_direct( struct thread *thread, union generic_reply *reply, void **reply_data )")
 call = func_body(REQ, "int ios_srv_direct_call( unsigned int tid, client_ptr_t teb, const union generic_request *request,")
 try_direct = func_body(NTDLL, "static BOOL ios_srv_try_direct( struct __server_request_info *req, unsigned int *status )")
 check(all((enter, leave, exit_, level, run, call, try_direct)), "the loop's lock helpers, the direct-request functions "
@@ -522,8 +522,15 @@ check(set(listed2) == {"REQ_select", "REQ_create_timer", "REQ_open_timer", "REQ_
       "level 2 adds select, the timer requests and set_cursor only")
 check("thread->teb != teb" in call and "thread->req_toread" in call and "thread->reply_towrite" in call,
       "the thread must be the caller (TEB) with no request half read and no reply half written")
-check(call.find("set_current_time();") < call.find("ios_srv_run_direct( thread, &reply, reply_data );"),
+check(0 <= call.find("set_current_time();") < call.find("ios_srv_run_direct( thread, &reply, &reply_copy );"),
       "the clock is updated before the handler, as the loop does after each wake")
+i_lock = call.find("os_unfair_lock_lock( &ios_srv_lock );")
+i_unlock = call.find("os_unfair_lock_unlock( &ios_srv_lock );\n    if (wake) ios_wineserver_wake();")
+check(0 <= call.find("memcpy( &request_copy, request, sizeof(request_copy) );") < i_lock
+      and "memcpy( &thread->req, &request_copy, sizeof(thread->req) );" in call
+      and i_lock < i_unlock < call.find("memcpy( reply_data, reply_copy, reply.reply_header.reply_size );")
+      and "memcpy( reply_data" not in run and "free( reply_copy );" in call,
+      "the caller's memory (the request, the reply's buffer) is touched only outside the lock")
 check(call.find("os_unfair_lock_unlock( &ios_srv_lock );\n    if (wake) ios_wineserver_wake();") > 0,
       "the timer wake is sent after the lock is released")
 m = re.search(r"static void call_req_handler\( struct thread \*thread \)\n\{(.*?)\n\}\n", REQ, re.S)

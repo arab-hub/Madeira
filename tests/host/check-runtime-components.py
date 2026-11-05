@@ -295,6 +295,14 @@ exit 86
         self.write('app/Madeira/' + fixture_path, fixture(fixture_path) + b'changed fixture')
         self.assertNotEqual(before, runtime.input_key('windows', self.sdk))
 
+    def test_committed_farm_binary_changes_source_key(self):
+        before = runtime.input_key('windows', self.sdk)
+        self.write('app/Madeira/arm64ec-windows/kernelbase.dll', pe(0x8664) + b'committed change')
+        self.assertEqual(before, runtime.input_key('windows', self.sdk))
+        self.git('add', 'app/Madeira/arm64ec-windows/kernelbase.dll')
+        self.git('commit', '-qm', 'a changed farm binary')
+        self.assertNotEqual(before, runtime.input_key('windows', self.sdk))
+
     def test_native_dependency_and_command_bounds(self):
         for dependency, valid in [('/opt/homebrew/lib/libhost.dylib', False),
                                   ('@rpath/libmissing.dylib', False),

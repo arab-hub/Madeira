@@ -23,6 +23,9 @@ import QuartzCore
 /// unchanged, but the panel runs at 120Hz for the whole session, which
 /// costs power, so it is not the default. The 30 cap keeps a 60Hz intent
 /// (33.3ms is an exact multiple of 16.67ms).
+///
+/// Adaptive (`env.MADEIRA_PROMOTE_ADAPTIVE`, on unless 0): in the 60 cap the panel
+/// goes to its maximum only while it helps, see adaptiveCheck. Hold-maximum wins.
 final class ProMotionIntent {
     static let shared = ProMotionIntent()
     private var link: CADisplayLink?
@@ -33,6 +36,10 @@ final class ProMotionIntent {
 
     /// The opt-in above; read when a session's pacing is applied.
     static var holdMaximum: Bool { MadeiraConfig.flag("MADEIRA_PROMOTE", fallback: false) }
+
+    /// Adaptive panel rate in the 60 cap: on unless env.MADEIRA_PROMOTE_ADAPTIVE = 0. Read once per
+    /// arming, a second in, when the session's environment is in place (see applyDisplaySync).
+    static var adaptiveEnabled: Bool { MadeiraConfig.flag("MADEIRA_PROMOTE_ADAPTIVE", fallback: true) }
 
     /// ml2020: hold the panel at 60 Hz under the 60 and 30 caps too. Without any
     /// display link a ProMotion iPhone lets the panel idle once nothing drives
@@ -93,6 +100,7 @@ final class ProMotionIntent {
             link?.invalidate()
             link = nil
             activeMax = 0
+            adaptiveFloor = 0
         }
     }
 
@@ -110,6 +118,75 @@ final class ProMotionIntent {
         LogStore.shared.log("[promote] pacing mode \(mode): display intent \(hz) Hz (panel max \(panelMaxFPS), hold-maximum \(holdMaximum), floor \(panelFloor))")
         shared.setActive(hz > 0, maxHz: hz)
         madeira_set_display_max_fps(Int32(panelMaxFPS), Int32(hz))
+        // Not with hold-maximum (hz is already the panel's), a 60 Hz panel or no link (MADEIRA_PANEL_IDLE).
+        shared.adaptiveBegin(floor: mode == 1 && hz > 0 && hz < panelMaxFPS ? hz : 0)
+    }
+
+    /// Adaptive panel rate in the 60 cap. Once a second, from the link's tick (no work between
+    /// samples, no allocation), the mean interval of the last second's presents, whether or not
+    /// the overlay shows: above 17 ms for 2 s, a frame is missing the 60 Hz grid (see the type
+    /// comment), so the panel goes to its maximum; 16.9 ms or less for `adaptiveHold` seconds, a
+    /// steady 60, it comes back. Under 10 frames in the second says nothing either way (a load,
+    /// no game yet). A frame time that needs the panel to reach 60 would flip it each time, so
+    /// going up again within a minute of coming down doubles the hold, to at most 5 minutes.
+    private var adaptiveFloor = 0                 // the rate to come back to; 0 = adaptive is off
+    private var adaptiveArmed = false
+    private var adaptiveEnableRead = false
+    private var adaptiveLast: CFTimeInterval = 0
+    private var adaptiveSlow = 0
+    private var adaptiveSteady = 0
+    private var adaptiveHold = ProMotionIntent.adaptiveHoldMin
+    private var adaptiveReleased: CFTimeInterval = 0
+    private let adaptiveIntervals = UnsafeMutablePointer<UInt32>.allocate(capacity: 256)
+    private static let adaptiveHoldMin = 8, adaptiveHoldMax = 300
+
+    private func adaptiveBegin(floor: Int) {
+        adaptiveFloor = floor
+        adaptiveArmed = false; adaptiveEnableRead = false
+        adaptiveLast = 0; adaptiveSlow = 0; adaptiveSteady = 0
+        adaptiveHold = Self.adaptiveHoldMin; adaptiveReleased = 0
+    }
+
+    private func adaptiveCheck(now: CFTimeInterval) {
+        guard adaptiveFloor > 0 else { return }
+        if adaptiveLast == 0 { adaptiveLast = now; return }
+        let gap = now - adaptiveLast
+        guard gap >= 1 else { return }
+        adaptiveLast = now
+        if !adaptiveEnableRead {
+            adaptiveEnableRead = true
+            if !Self.adaptiveEnabled {
+                adaptiveFloor = 0
+                LogStore.shared.log("[promote] adaptive off (env.MADEIRA_PROMOTE_ADAPTIVE = 0)")
+                return
+            }
+        }
+        var since: UInt32 = 0
+        let n = Int(madeira_frame_times_us(adaptiveIntervals, 256, 1000, &since))
+        // A gap means the link was paused (the app in the background): the second says nothing.
+        guard n >= 10, gap < 3 else { adaptiveSlow = 0; adaptiveSteady = 0; return }
+        var sum: UInt64 = 0
+        for i in 0..<n { sum += UInt64(adaptiveIntervals[i]) }
+        let ms = Double(sum) / Double(n) / 1000
+        if !adaptiveArmed {
+            adaptiveSlow = ms > 17 ? adaptiveSlow + 1 : 0
+            guard adaptiveSlow >= 2 else { return }
+            adaptiveHold = adaptiveReleased > 0 && now - adaptiveReleased < 60
+                ? min(adaptiveHold * 2, Self.adaptiveHoldMax) : Self.adaptiveHoldMin
+            adaptiveArmed = true; adaptiveSteady = 0
+            LogStore.shared.log(String(format: "[promote] adaptive: %.1f ms a frame for 2 s: display intent %d Hz until a steady 60 for %d s",
+                                       ms, Self.panelMaxFPS, adaptiveHold))
+            setActive(true, maxHz: Self.panelMaxFPS)
+            madeira_set_display_max_fps(Int32(Self.panelMaxFPS), Int32(Self.panelMaxFPS))
+        } else {
+            adaptiveSteady = ms <= 16.9 ? adaptiveSteady + 1 : 0
+            guard adaptiveSteady >= adaptiveHold else { return }
+            adaptiveArmed = false; adaptiveSlow = 0; adaptiveReleased = now
+            LogStore.shared.log(String(format: "[promote] adaptive: a steady 60 (%.1f ms) for %d s: display intent back to %d Hz",
+                                       ms, adaptiveHold, adaptiveFloor))
+            setActive(true, maxHz: adaptiveFloor)
+            madeira_set_display_max_fps(Int32(Self.panelMaxFPS), Int32(adaptiveFloor))
+        }
     }
 
     /// ml2021: what the link actually runs at. Log 71 ran with the 120 Hz link armed and
@@ -165,6 +242,7 @@ final class ProMotionIntent {
             tickStart = now; tickCount = 1; tickMaxGap = 0
         }
         if ProMotionIntent.kickEnabled { kick() }
+        adaptiveCheck(now: now)
     }
 
     private func kick() {

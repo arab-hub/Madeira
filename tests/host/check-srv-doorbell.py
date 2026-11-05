@@ -175,6 +175,17 @@ assert 'ios_slow_pass = !ios_doorbell || ios_full_scan || now_ns - ios_last_slow
 assert loop.index('ios_doorbell_service();') < loop.index('if (!ios_slow_pass) continue;') \
     < loop.index('if (!ios_fd_is_inet( i, pollfd[i].fd )) continue;'), 'a request pass returns to the wait before the scans'
 assert 'fprintf( stderr, "[srv-doorbell]' in loop, 'the heartbeat reaches the session log'
+assert 'strtol( fs, NULL, 10 ) : 50;' in loop and 'ios_fullscan_ns = 50000000ull;' in loop, 'a full scan every 50 ms by default'
+# ...which is why what only a full scan used to notice now rings: a thread's EOF and a process's.
+thread_src = (root / 'build/ntdll-unix/thread_ios.c').read_text()
+exit_wrapper = thread_src[thread_src.index('static DECLSPEC_NORETURN void pthread_exit_wrapper( int status )'):]
+assert exit_wrapper.index('close( ntdll_get_thread_data()->request_fd );') \
+    < exit_wrapper.index('ios_wineserver_ring( HandleToULong( NtCurrentTeb()->ClientId.UniqueThread ) );') \
+    < exit_wrapper.index('pthread_exit( UIntToPtr(status) );', exit_wrapper.index('request_fd );')), \
+    'a thread rings after closing its request fd, before it exits'
+proc_exit = ntdll[ntdll.index('void process_exit_wrapper( int status )'):]
+assert proc_exit.index('close( ios_proc_sockets[i].fd );') < proc_exit.index('ios_wineserver_ring( 0 );') \
+    < proc_exit.index('ios_proc_sockets[i].peb = NULL;'), 'a process asks for a full scan after closing its socket'
 assert 'if (ios_full_scan)\n                            {\n                                revents |= POLLIN;' in loop, \
     'client fds get the synthetic POLLIN only on a full-scan pass'
 poll_thread = req[req.index('int ios_doorbell_poll_thread( unsigned int tid )'):]

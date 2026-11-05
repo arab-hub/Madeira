@@ -15,9 +15,17 @@ int wineserver_is_running(void);
 /* 1 once the server has finished starting up (registry loaded), just before
  * its main loop: the point from which Wine may start. */
 int wineserver_is_ready(void);
+/* The message of the fatal error that ended the server thread in this session, NULL when
+ * none; wineserver_is_running() is 0 from then on. */
+const char *wineserver_fatal_message(void);
 
 // Stop the wineserver (signals the thread to exit)
 void wineserver_stop(void);
+
+/* For the app's exit: ask the server to stop and wait up to 500 ms for it to finish, which
+ * saves the registry. Never blocks longer; does nothing when the server never started or
+ * has already stopped. The server does not run again in this app run. */
+void wineserver_flush_for_exit(void);
 
 // iOS socketpair bypass: inject a pre-connected client fd into the wineserver.
 // Called from the app bridge after socketpair() — the wineserver event loop

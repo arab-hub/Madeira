@@ -178,13 +178,13 @@ OVERLAY = {
                         "at least 2 MB, so their stacks take less of the shared memory space. Never list Chromium "
                         "programs (SocialClubHelper.exe, Launcher.exe, steamwebhelper.exe). Read when a thread starts."},
     "quiet-log": {"category": "Direct3D 12", "title": "Cheaper Direct3D 12 logging (no census frames)",
-                "kind": "bool", "default": "0",
-                "note": "1: the Direct3D 12 runtime's log lines skip OutputDebugString (an exception and a server "
+                "kind": "bool", "default": "1",
+                "note": "On by default: the Direct3D 12 runtime's log lines skip OutputDebugString (an exception and a server "
                         "request each, ~0.5 ms a line on the device) and reach the log through Wine's own debug "
                         "output and stderr only; the census frames between presents 1500 and 3000 and the list "
                         "12000-12400 draw dumps are off (each froze the game for 1-2 s); the per-shader "
                         "\"converted at runtime\" line is kept for the first 64 shaders and then every 1000th. "
-                        "A manual frame capture still works. Default off: the logging as before."},
+                        "A manual frame capture still works. 0: the logging as before, census frames included."},
     "replay-split": {"category": "Direct3D 12", "title": "Log where Direct3D 12 submission time goes",
                 "kind": "bool", "default": "0",
                 "note": "Default off, logging only. 1: every 5 seconds a [perf] replay split line divides the time "
@@ -784,6 +784,13 @@ OVERLAY = {
                         "leave it off for good. 0: the pad reads at rest while disabled, as before. Read by win32u, so "
                         "32- and 64-bit games alike."},
     "env.MADEIRA_PROMOTE": {"title": "Hold the display at its maximum rate"},
+    "env.MADEIRA_PROMOTE_ADAPTIVE": {"title": "Raise the display rate when a game misses 60 FPS",
+                "kind": "bool", "default": "1",
+                "note": "On by default, under the 60 FPS limit on a 120 Hz panel: when frames take more than 17 ms for 2 s the "
+                        "panel goes to its maximum, so a late frame shows at the next 8 ms instead of the next 16 ms; after a "
+                        "steady 60 for 8 s it comes back (longer if it keeps returning, up to 5 min). [promote] lines in the "
+                        "log. Hold the display at its maximum rate wins. 0: the panel stays at 60 Hz. Needs the display link "
+                        "(not with env.MADEIRA_PANEL_IDLE = 1). Read once a session."},
     # madeira-bcd: GTA V Enhanced's Social Club (StikJITHelper.swift, process_ios.c, virtual_ios.c).
     "pool-split": {"category": "Memory & JIT pool", "title": "Split JIT pool around the main thread's stack",
                 "kind": "bool", "default": "0",
@@ -1003,14 +1010,14 @@ OVERLAY = {
                         "100 ms now goes before such a paint. 0: the strict order, as before. Read once per app run."},
     # madeira-bcd: lean periodic diagnostics (build/ntdll-unix/server_ios.c, virtual_ios.c).
     "env.MADEIRA_LEAN_DIAG": {"category": "Debugging / logs", "title": "Lean diagnostics (no thread-suspending samplers)",
-                "kind": "bool", "default": "0",
+                "kind": "bool", "default": "1",
                 "sources": ["build/ntdll-unix/server_ios.c", "build/ntdll-unix/virtual_ios.c"],
-                "note": "1: the samplers that suspend threads stop ([thread-sample] bursts every 20 s, the guest RIP "
-                        "profile behind [rip-profile] and [cpu-split], [wprof]); the warmer's address-space walks "
-                        "([phys-map], slot and window inventory) run every ~10 min instead of every minute, its zone "
-                        "check and allocation probe every minute instead of every 2 s; mprotect_exec's per-call ERR "
-                        "line is kept for the first 200 calls, then every 1000th. [xp], [xp-t], [xp-api] and "
-                        "[sync-census] keep their rates. Off (default): every diagnostic as before. Read at session start."},
+                "note": "On by default: the samplers that suspend threads stop ([thread-sample] bursts every 20 s, the guest "
+                        "RIP profile behind [rip-profile] and [cpu-split], [wprof]). 0: they run, as before. Set to 1 explicitly: "
+                        "also the warmer's address-space walks ([phys-map], slot and window inventory) run every ~10 min "
+                        "instead of every minute, its zone check and allocation probe every minute instead of every 2 s, and "
+                        "mprotect_exec's per-call ERR line is kept for the first 200 calls, then every 1000th. [xp], [xp-t], "
+                        "[xp-api], [sync-census] and the stuck-store check (MADEIRA_STUCK_CHECK) do not change. Read at session start."},
     # madeira-bcd: the runtime's native helper threads at utility QoS (build/ntdll-unix/thread_ios.c).
     "env.MADEIRA_ECO_NATIVE": {"category": "Wine core (ntdll)", "title": "Runtime helper threads on efficiency cores",
                 "kind": "bool", "default": "0",

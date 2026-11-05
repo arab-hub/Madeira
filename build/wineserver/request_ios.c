@@ -537,7 +537,12 @@ static void call_req_handler( struct thread *thread )
  * A request that cannot run here (the switch went off, the loop is not running, the thread
  * is not fully connected or is not the caller) goes through the pipe as before; one that
  * ends its own thread is sent through the pipe as well, which the server has closed by
- * then, so the client's EPIPE path reports it exactly as it does today. */
+ * then, so the client's EPIPE path reports it exactly as it does today.
+ *
+ * The caller's memory (the request, its data pieces, the reply and the reply's buffer, which
+ * can be guest memory) is touched only outside the lock. A fault there may enter a handler
+ * that sends requests of its own; under the lock that thread could never get it back. The
+ * listed handlers work on the server's copies and do not read process memory. */
 os_unfair_lock ios_srv_lock = OS_UNFAIR_LOCK_INIT;
 volatile int ios_srv_direct_live;          /* fd_ios.c: set and cleared by the loop under the lock */
 volatile int ios_srv_timer_added;          /* fd_ios.c add_timeout_user: the sleeping loop must wake */
@@ -594,8 +599,9 @@ static int ios_srv_direct_level( enum request req )
     }
 }
 
-/* call_req_handler's steps with the reply copied out: 1 done, -1 the request ended the thread */
-static int ios_srv_run_direct( struct thread *thread, union generic_reply *reply, void *reply_data )
+/* call_req_handler's steps with the reply handed out: 1 done, *reply_data is the reply's data
+ * (malloc'd or NULL, the caller's to copy and free), -1 the request ended the thread */
+static int ios_srv_run_direct( struct thread *thread, union generic_reply *reply, void **reply_data )
 {
     enum request req = thread->req.request_header.req;
     int ret = -1;
@@ -617,8 +623,7 @@ static int ios_srv_run_direct( struct thread *thread, union generic_reply *reply
             reply->reply_header.error = current->error;
             reply->reply_header.reply_size = current->reply_size;
             if (debug_level) trace_reply( req, reply );
-            if (current->reply_size) memcpy( reply_data, current->reply_data, current->reply_size );
-            free( current->reply_data );
+            *reply_data = current->reply_data;
             current->reply_data = NULL;
             ret = 1;
         }
@@ -642,13 +647,15 @@ int ios_srv_direct_call( unsigned int tid, client_ptr_t teb, const union generic
     enum request req = request->request_header.req;
     data_size_t size = request->request_header.request_size, done = 0;
     int level = __atomic_load_n( &g_madeira_srv_direct, __ATOMIC_ACQUIRE ), need, ret, wake = 0;
+    union generic_request request_copy;
     union generic_reply reply;
     struct thread *thread;
-    void *data = NULL;
+    void *data = NULL, *reply_copy = NULL;
     unsigned int i;
 
     if (level <= 0 || (unsigned int)req >= REQ_NB_REQUESTS) return 0;
     if (!(need = ios_srv_direct_level( req )) || need > level) return 0;
+    memcpy( &request_copy, request, sizeof(request_copy) );
     if (size)   /* contiguous and malloc'd, as read_request leaves it (cleanup_thread frees it) */
     {
         if (!(data = malloc( size ))) return 0;
@@ -679,9 +686,9 @@ int ios_srv_direct_call( unsigned int tid, client_ptr_t teb, const union generic
         goto pipe;
     }
     set_current_time();
-    memcpy( &thread->req, request, sizeof(thread->req) );
+    memcpy( &thread->req, &request_copy, sizeof(thread->req) );
     thread->req_data = data;
-    ret = ios_srv_run_direct( thread, &reply, reply_data );
+    ret = ios_srv_run_direct( thread, &reply, &reply_copy );
     free( thread->req_data );   /* NULL when kill_thread has freed it */
     thread->req_data = NULL;
     release_object( thread );
@@ -694,7 +701,12 @@ int ios_srv_direct_call( unsigned int tid, client_ptr_t teb, const union generic
     }
     os_unfair_lock_unlock( &ios_srv_lock );
     if (wake) ios_wineserver_wake();
-    if (ret > 0) memcpy( reply_out, &reply, sizeof(reply) );
+    if (ret > 0)
+    {
+        if (reply.reply_header.reply_size) memcpy( reply_data, reply_copy, reply.reply_header.reply_size );
+        memcpy( reply_out, &reply, sizeof(reply) );
+    }
+    free( reply_copy );
     return ret;
 
 pipe:
