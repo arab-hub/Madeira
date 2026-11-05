@@ -42,6 +42,8 @@
       "madeira-d3d12/src/**",
       "madeira-d3d12/tests/windows/**",
       "tools/build/build-wine.sh",
+      "tools/build/apply-wine-patches.sh",
+      "patches/wine-opengl-winios.patch",
       "tools/build/setup-llvm-mingw.sh",
       "tools/build/build-shader-headers.sh",
       "tools/build/build-llvm-ios.sh",

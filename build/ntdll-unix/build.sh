@@ -9,6 +9,10 @@ SDK=$(xcrun --sdk iphoneos --show-sdk-path)
 OBJ_DIR="$BUILD_DIR/obj"
 APP_LIB="$REPO_ROOT/app/Madeira/libntdll_unix.a"
 
+# opengl32's unix side below is compiled from the patched sources; this step may
+# run from a cached Wine tree without build-wine.sh having run first.
+ROOT="$REPO_ROOT" bash "$REPO_ROOT/tools/build/apply-wine-patches.sh"
+
 mkdir -p "$OBJ_DIR"
 
 # Optional Vulkan route; do not change the normal native build.
