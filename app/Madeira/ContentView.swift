@@ -1232,6 +1232,23 @@ final class InputSettings: ObservableObject {
     /// default: a program that reads the controller already gets the stick.
     @Published var padRightStickMouse = false { didSet { save() } }
 
+    /// The global pointer mode while a game's own is in force (LibraryEntry.pointerMode): the
+    /// file keeps it, so a crash in that session does not change the global choice.
+    private var globalPointer: (relative: Bool, touchMode: Bool)?
+    /// A session's start with the game's pointer mode, nil at its end (back to the global one).
+    func applyGamePointerMode(_ mode: String?) {
+        if let mode, ["absolute", "relative", "touch"].contains(mode) {
+            if globalPointer == nil { globalPointer = (relative, touchMode) }
+            relative = mode == "relative"
+            touchMode = mode == "touch"
+        } else if let global = globalPointer {
+            globalPointer = nil
+            relative = global.relative
+            touchMode = global.touchMode
+        }
+    }
+    var currentPointerMode: String { touchMode ? "touch" : (relative ? "relative" : "absolute") }
+
     /// didSet fires for assignments made in init() because the properties are
     /// already initialised by then; without this the first launch would write
     /// the defaults back over a file it had only half-read.
@@ -1261,10 +1278,10 @@ final class InputSettings: ObservableObject {
 
     private func save() {
         guard !loading else { return }
-        let j: [String: Any] = ["relative": relative, "sensAbs": sensAbs, "sensRel": sensRel, "diagnostics": diagnostics,
+        let j: [String: Any] = ["relative": globalPointer?.relative ?? relative, "sensAbs": sensAbs, "sensRel": sensRel, "diagnostics": diagnostics,
                                 "sensMouse": sensMouse, "ignoreTouchesWithMouse": ignoreTouchesWithMouse,
                                 "padRightStickMouse": padRightStickMouse,
-                                "touchMode": touchMode]
+                                "touchMode": globalPointer?.touchMode ?? touchMode]
         guard let d = try? JSONSerialization.data(withJSONObject: j) else { return }
         try? d.write(to: Self.url, options: .atomic)
     }
@@ -1346,7 +1363,10 @@ struct ContentView: View {
                     LibraryModel.shared.prepareForExit()
                     exit(0)
                 }
-                Button("Later", role: .cancel) { library.restartNotice = nil }
+                Button("Later", role: .cancel) {
+                    library.restartNotice = nil
+                    NextGameAfterRestart.clear()   // a game held for the restart stays unstarted
+                }
             } message: { Text(library.restartNotice ?? "") }
             // CS_DEBUGGED without a debugger (JIT enabled outside Madeira): offer Madeira's own request.
             .alert("Enable JIT", isPresented: Binding(get: { library.jitNotice != nil },
@@ -2540,14 +2560,27 @@ struct ContentView: View {
         if let exe = ShortcutRouter.shared.pendingExe {
             ShortcutRouter.shared.pendingExe = nil
             _ = NextSteamApp.take()
+            NextGameAfterRestart.clear()
             launchShortcut(exe); return
         }
-        guard LibraryModel.sessionsThisRun == 0, let appID = NextSteamApp.take() else { return }
-        guard let entry = library.entries.first(where: { $0.steamAppID == appID }) else {
-            LogStore.shared.log("[dock-steam-run] app \(appID) is not in the library: not started", level: .error); return
+        guard LibraryModel.sessionsThisRun == 0 else { return }
+        // One-shot, both of them: each is taken before its start, so a start that crashes is not retried.
+        let heldGame = NextGameAfterRestart.take()
+        if let appID = NextSteamApp.take() {
+            guard let entry = library.entries.first(where: { $0.steamAppID == appID }) else {
+                LogStore.shared.log("[dock-steam-run] app \(appID) is not in the library: not started", level: .error); return
+            }
+            LogStore.shared.log("[dock-steam-run] starting app \(appID), which the last run's game asked for")
+            launchLibraryEntry(entry)
+            return
         }
-        LogStore.shared.log("[dock-steam-run] starting app \(appID), which the last run's game asked for")
-        launchLibraryEntry(entry)
+        // The game pressed when the last run held its launch for a restart.
+        guard let heldGame else { return }
+        guard library.entries.contains(where: { $0.desktop != true && $0.windowsPath.lowercased() == heldGame.lowercased() }) else {
+            LogStore.shared.log("[session-once] the held game \(heldGame) is not in the library: not started", level: .error); return
+        }
+        LogStore.shared.log("[session-once] starting \(heldGame), held for this restart")
+        launchShortcut(heldGame)
     }
 
     /// A Home Screen shortcut starts a game that is in the library, by its Windows
@@ -2599,7 +2632,7 @@ struct ContentView: View {
         // One Wine session per app run (see LibraryModel.sessionsThisRun).
         if LibraryModel.sessionsThisRun > 0, MadeiraConfig.flag("MADEIRA_ONE_SESSION_PER_RUN") {
             LogStore.shared.log("[session-once] launch held: \(LibraryModel.sessionsThisRun) session(s) already ran in this app run")
-            library.restartNotice = LibraryModel.restartMessage; return
+            library.restartNotice = LibraryModel.restartMessage + NextGameAfterRestart.hold(entry); return
         }
         // The same precondition runWineFullSequence checks: the JIT pool is
         // taken at launch, through the debugger. Without it, Play enables JIT and
@@ -3540,7 +3573,7 @@ struct ContentView: View {
         }
         if inLibrary, LibraryModel.sessionsThisRun > 0, MadeiraConfig.flag("MADEIRA_ONE_SESSION_PER_RUN") {
             LogStore.shared.log("[session-once] Dock launch held: \(LibraryModel.sessionsThisRun) session(s) already ran in this app run")
-            library.restartNotice = LibraryModel.restartMessage
+            library.restartNotice = LibraryModel.restartMessage + (profile.map { NextGameAfterRestart.hold($0) } ?? "")
             return
         }
         func fail(_ error: Error) {
@@ -3871,6 +3904,7 @@ struct ContentView: View {
             let model = LibraryModel.shared
             guard model.current != nil else { return }
             model.sessionMessage = message
+            model.serverStopped = true
             model.forceCloseOffered = true
             if model.startingScreen { model.showGameView(reason: "server-fatal") }
             model.menu = true

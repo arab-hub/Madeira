@@ -51,7 +51,7 @@ enum MadeiraBuiltInJIT {
         guard #available(iOS 26.0, *) else {
             return "Built-in JIT requires iOS 26 or later."
         }
-        if getenv("LC_HOME_PATH") != nil {
+        if LiveContainerEnv.isLiveContainer {
             return "Built-in JIT is unavailable inside LiveContainer. Choose StikDebug instead."
         }
         return nil
@@ -206,5 +206,29 @@ enum MadeiraExtensionProbe {
                 LogStore.shared.log("[ext-probe] ml1310 failed: \(error.localizedDescription)", level: .error)
             }
         }
+    }
+}
+
+/// Madeira running as a guest of LiveContainer, which sets LC_HOME_PATH to its own home.
+/// The one place that asks; the guidance that differs there (JIT, Memory+, where drive_c is)
+/// reads it. docs/JIT.md, "LiveContainer".
+enum LiveContainerEnv {
+    static let isLiveContainer = getenv("LC_HOME_PATH") != nil
+
+    /// Where drive_c really is: below LiveContainer's own Documents folder when it is, as the
+    /// path under that folder, otherwise the whole path.
+    static var driveLocation: String {
+        func plain(_ path: String) -> String { path.hasPrefix("/private/") ? String(path.dropFirst(8)) : path }
+        let drive = plain(LibraryModel.documents.appendingPathComponent("wine/drive_c").path)
+        guard let home = getenv("LC_HOME_PATH") else { return drive }
+        let documents = plain(String(cString: home)) + "/Documents/"
+        guard drive.hasPrefix(documents) else { return drive }
+        return drive.dropFirst(documents.count).split(separator: "/").joined(separator: " › ")
+    }
+
+    /// The empty library's text inside LiveContainer: "Madeira › wine › drive_c" is not there.
+    static var emptyLibraryText: String {
+        "Madeira runs inside LiveContainer, so its drive_c is in LiveContainer's Documents folder: \(driveLocation). "
+            + "Copy a game's folder there with the Files app, then tap + and choose its .exe."
     }
 }

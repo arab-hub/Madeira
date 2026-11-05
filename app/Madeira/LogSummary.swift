@@ -85,6 +85,8 @@ enum LogSummary {
         var quitAsked: String?
         var handedToSteam = false
         var forceClosed = false
+        /// The first "[Wine] FATAL:" line's message: the server thread ended (WineServerBridge.m).
+        var serverFatal: String?
         var poolWantedMB: Int?
         var poolMB: Int?
         var smallPool = false
@@ -224,6 +226,12 @@ enum LogSummary {
                 facts.quitAsked = facts.lastTime ?? "?"
             }
             if line.contains("[frontend] force close") { facts.forceClosed = true }
+            if let r = line.range(of: "[Wine] FATAL: ") {
+                facts.sawSession = true
+                if facts.serverFatal == nil {
+                    facts.serverFatal = String(line[r.upperBound...].prefix(240)).trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+            }
             if line.contains("[WineProc] the main process exited while"), line.contains("(steam.exe)") { facts.handedToSteam = true }
             if line.contains("JIT pool allocation FAILED — not starting Wine.") {
                 facts.sawSession = true
@@ -282,45 +290,7 @@ enum LogSummary {
             out.append("Programs started: " + counts.map { $0.1 > 1 ? "\($0.0) (\($0.1)x)" : $0.0 }.joined(separator: ", "))
         }
 
-        var problems: [String] = []
-        if f.poolAllocationFailed {
-            problems.append("The JIT pool could not be allocated, so Wine was not started. See the JIT pool lines in the full log for the reason.")
-        }
-        if f.guestWindowFailed {
-            problems.append("A 32-bit program could not reserve its 4 GB guest-memory window. See the [wow-window] lines in the full log for the reservation failure.")
-        }
-        if f.smallPool, let mb = f.poolMB {
-            problems.append("The JIT pool (the memory games' code runs from) got \(mb) MB"
-                + (f.poolWantedMB.map { " instead of \($0) MB" } ?? "")
-                + ": iPadOS had no larger free space at launch. Big games may run out of it."
-                + " Relaunching Madeira can give a bigger one; `pool-split = 1` in the game's config lets Madeira join two free spaces.")
-        }
-        if f.exhausted > 0 {
-            problems.append("The JIT pool ran out \(f.exhausted)x" + (f.exhaustedWant > 0 ? " (largest request \(mb(f.exhaustedWant)) MB)" : "")
-                + ": a DLL could not be loaded, and the program usually stops right after.")
-        }
-        for m in f.missing where m.status == "c0000017" {
-            problems.append("\(m.name) could not be loaded: out of memory" + (m.program.map { " (in \($0))" } ?? "") + ".")
-        }
-        if let report = f.exitReport { problems.append("The program stopped with Windows error \(report).") }
-        if f.handedToSteam, f.dock.isEmpty {
-            problems.append("The game started Steam and closed itself: it only runs when Steam starts it. Start it with Madeira Dock (Game details > Steam > Start with).")
-        }
-        for crash in f.crashes {
-            problems.append("\(crash.program ?? "A program") crashed: \(crash.what) at address \(crash.address)."
-                            + " Searching the address with the game's name often finds a known fix.")
-        }
-        if f.madeiraEnded, f.execRefused {
-            let started = f.processes.last.map { " The last program started was \($0.image)." } ?? ""
-            problems.append("Madeira closed: iPadOS refused to run a program's code. Madeira can start only one 32-bit program"
-                            + " per session, so this usually means a launcher started the game.\(started)"
-                            + " For a Steam game, pick the game's own program in Game details > Steam > Steam starts.")
-        }
-        if let why = f.startProgramFailed {
-            problems.append("Steam starts: the chosen program was not put in place (\(why)), so Steam started its own.")
-        }
-        problems += f.unhandled.map { "Unhandled exception: \($0)" }
-        if let words = dockWords(f.dock) { problems.append("Madeira Dock: \(words)") }
+        let problems = Self.problems(f)
         out.append("")
         out.append(problems.isEmpty ? "Problems found: none of the known signs." : "Problems found:")
         out += problems.map { "  ! " + $0 }
@@ -364,6 +334,62 @@ enum LogSummary {
                 + (f.dock["probe-result"].map { ", Madeira Dock result \($0)" } ?? ""))
         }
         return out.joined(separator: "\n") + "\n"
+    }
+
+    /// A fatal wineserver error, in words. The hang behind a refused bind (the server thread
+    /// gone before its main loop, the first Wine process waiting for its request_fd) gets its name.
+    static func serverFatalWords(_ message: String) -> String {
+        var words = "The Wine server stopped: \(message). Wine then waits for replies that never come, so the game cannot go on. Close Madeira and open it again."
+        if message.lowercased().hasPrefix("bind:") {
+            words += " iOS refused the server's socket in the prefix (seen inside LiveContainer), and the first Wine process waits forever for its request_fd."
+        }
+        return words
+    }
+
+    /// The problems the log shows, in words: the summary's list, and the starting screen's
+    /// when a start hangs (LibraryModel.refreshLaunchProblems).
+    static func problems(_ f: Facts) -> [String] {
+        var problems: [String] = []
+        if let fatal = f.serverFatal { problems.append(serverFatalWords(fatal)) }
+        if f.poolAllocationFailed {
+            problems.append("The JIT pool could not be allocated, so Wine was not started. See the JIT pool lines in the full log for the reason.")
+        }
+        if f.guestWindowFailed {
+            problems.append("A 32-bit program could not reserve its 4 GB guest-memory window. See the [wow-window] lines in the full log for the reservation failure.")
+        }
+        if f.smallPool, let mb = f.poolMB {
+            problems.append("The JIT pool (the memory games' code runs from) got \(mb) MB"
+                + (f.poolWantedMB.map { " instead of \($0) MB" } ?? "")
+                + ": iPadOS had no larger free space at launch. Big games may run out of it."
+                + " Relaunching Madeira can give a bigger one; `pool-split = 1` in the game's config lets Madeira join two free spaces.")
+        }
+        if f.exhausted > 0 {
+            problems.append("The JIT pool ran out \(f.exhausted)x" + (f.exhaustedWant > 0 ? " (largest request \(mb(f.exhaustedWant)) MB)" : "")
+                + ": a DLL could not be loaded, and the program usually stops right after.")
+        }
+        for m in f.missing where m.status == "c0000017" {
+            problems.append("\(m.name) could not be loaded: out of memory" + (m.program.map { " (in \($0))" } ?? "") + ".")
+        }
+        if let report = f.exitReport { problems.append("The program stopped with Windows error \(report).") }
+        if f.handedToSteam, f.dock.isEmpty {
+            problems.append("The game started Steam and closed itself: it only runs when Steam starts it. Start it with Madeira Dock (Game details > Steam > Start with).")
+        }
+        for crash in f.crashes {
+            problems.append("\(crash.program ?? "A program") crashed: \(crash.what) at address \(crash.address)."
+                            + " Searching the address with the game's name often finds a known fix.")
+        }
+        if f.madeiraEnded, f.execRefused {
+            let started = f.processes.last.map { " The last program started was \($0.image)." } ?? ""
+            problems.append("Madeira closed: iPadOS refused to run a program's code. Madeira can start only one 32-bit program"
+                            + " per session, so this usually means a launcher started the game.\(started)"
+                            + " For a Steam game, pick the game's own program in Game details > Steam > Steam starts.")
+        }
+        if let why = f.startProgramFailed {
+            problems.append("Steam starts: the chosen program was not put in place (\(why)), so Steam started its own.")
+        }
+        problems += f.unhandled.map { "Unhandled exception: \($0)" }
+        if let words = dockWords(f.dock) { problems.append("Madeira Dock: \(words)") }
+        return problems
     }
 
     static func dockWords(_ fields: [String: String]) -> String? {

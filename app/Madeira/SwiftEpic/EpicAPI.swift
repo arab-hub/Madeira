@@ -102,12 +102,18 @@ enum EpicTokenStore {
 
     @discardableResult static func save(_ session: EpicSession) -> Bool {
         guard let data = try? JSONEncoder().encode(session) else { return false }
-        delete()
-        let item: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
-                                   kSecAttrAccount as String: account, kSecValueData as String: data,
-                                   kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
-                                   kSecAttrSynchronizable as String: false]
-        return SecItemAdd(item as CFDictionary, nil) == errSecSuccess
+        // Update in place, so a failure or a crash keeps the old sign-in; add if there is none.
+        // The update also moves an item of another accessibility class to this one.
+        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
+                                    kSecAttrAccount as String: account]
+        let attributes: [String: Any] = [kSecValueData as String: data,
+                                         kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly]
+        var status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+        if status == errSecItemNotFound {
+            let item = query.merging(attributes) { $1 }.merging([kSecAttrSynchronizable as String: false]) { $1 }
+            status = SecItemAdd(item as CFDictionary, nil)
+        }
+        return status == errSecSuccess
     }
 
     static func delete() {

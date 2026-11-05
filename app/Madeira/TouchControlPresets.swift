@@ -398,6 +398,18 @@ final class ControlPresetsModel: ObservableObject {
         }
     }
 
+    /// A restore put a backup's file in place (SaveBackup), checked already: the menu lists it, and the next save keeps it.
+    func reloadFromDisk() {
+        guard let d = try? Data(contentsOf: Self.url) else { return }
+        do {
+            store = try ControlPresetStore.decoded(d)
+            readOnly = false
+        } catch {
+            readOnly = true
+            log("unreadable file kept, saving disabled: \(error.localizedDescription)")
+        }
+    }
+
     /// The controller built-in needs touch XInput; without it its buttons are inert.
     private static var touchPad: Bool { MainActor.assumeIsolated { GamepadInput.touchEnabled } }
 

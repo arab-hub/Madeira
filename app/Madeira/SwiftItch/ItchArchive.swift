@@ -461,6 +461,27 @@ extension ItchArchive {
         return nil
     }
 
+    /// What a .zip or .7z unpacks to, read from its directory; nil when it is neither.
+    static func unpackedBytes(_ archive: URL) throws -> UInt64? {
+        if isZip(archive) {
+            var total: UInt64 = 0
+            for entry in try entries(archive) {
+                let sum = total.addingReportingOverflow(entry.size)
+                guard !sum.overflow else { throw ItchArchiveError.damaged("size") }
+                total = sum.partialValue
+            }
+            return total
+        }
+        guard is7z(archive) else { return nil }
+        var opened: OpaquePointer?
+        let reasonSize = 64
+        var reason = [CChar](repeating: 0, count: reasonSize)
+        let status = i7z_open(archive.path, &opened, &reason, reasonSize)
+        guard status == Int32(I7Z_OK), let z = opened else { throw sevenZipError(status, String(cString: reason)) }
+        defer { i7z_close(z) }
+        return i7z_total(z)
+    }
+
     /// Archives inside an unpacked download: some itch.io builds are a .zip that holds
     /// the game's real archive (a .7z and a README, say). Every .zip and .7z within two
     /// levels of `folder` unpacks where it lies, its files beside it, and then goes.

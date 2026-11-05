@@ -241,6 +241,9 @@ key row it then shows, for attached devices only:
 - the mouse sensitivity slider and, on iPad, the pointer lock button;
 - the **Right stick controls mouse** toggle when a controller is connected.
 
+In the library the same toggle is always in **Settings → Pointer and touch** and
+the in-game menu's **Mouse & pointer**, with the pointer mode.
+
 The values are stored in `Documents/madeira-input.json` with the other pointer
 settings: `sensMouse`, `padRightStickMouse`, `ignoreTouchesWithMouse`.
 

@@ -63,6 +63,8 @@ struct GameSetup {
     var switches: [String: Any]
     struct IniFile: Equatable { var path: String; var data: Data }
     var iniFiles: [IniFile]
+    /// Config lines a setup that was read carried and that never reach the game (launchSafeConfig).
+    var removedConfigLines: [String] = []
 
     /// Entry fields that name this device's copy of the game, its history or its
     /// store, or that GameProfiles and LibraryPrefs now keep (config, avx, reportNVIDIA).
@@ -79,7 +81,7 @@ struct GameSetup {
     /// Fields "Touch controls and controller" stands for in Apply Shared Setup.
     static let controlKeys: Set<String> = [
         "touchControls", "controls", "zones", "controlOpacity", "controlSize", "controllerMode",
-        "controllerBinds", "padMouseVertical", "padAssist",
+        "controllerBinds", "padMouseVertical", "padAssist", "pointerMode",
     ]
 
     /// An entry's fields for a setup: everything but localKeys.
@@ -186,13 +188,62 @@ struct GameSetup {
         made = (object["made"] as? String).flatMap { ISO8601DateFormatter().date(from: $0) }
         appVersion = object["appVersion"] as? String
         entry = object["entry"] as? [String: Any] ?? [:]
-        config = object["config"] as? String ?? ""
+        let safe = Self.launchSafeConfig(object["config"] as? String ?? "")
+        config = safe.kept
+        removedConfigLines = safe.removed
         switches = object["switches"] as? [String: Any] ?? [:]
         iniFiles = (object["iniFiles"] as? [[String: Any]] ?? []).compactMap { item in
             guard let path = item["path"] as? String, let text = item["data"] as? String,
                   let bytes = Data(base64Encoded: text) else { return nil }
             return IniFile(path: path, data: bytes)
         }
+    }
+
+    /// Environment variables a shared setup may not set: what starts (the launch target and
+    /// its arguments), which libraries load, and where Madeira looks for its files. The player's
+    /// own config can set them; a setup from someone else cannot (WineProcessBridge.m exports
+    /// a game file's env.NAME lines over what the library set).
+    static let launchEnvironmentKeys: Set<String> = [
+        "MADEIRA_ARGS", "MADEIRA_CFG_EARLY_DOCS", "MADEIRA_CFG_GAME", "MADEIRA_CHILD_ARGS", "MADEIRA_DESKTOP",
+        "MADEIRA_DOCK_SESSION", "MADEIRA_ENV_LOCKED", "MADEIRA_EXE", "MADEIRA_NO_STEAM_IDENTITY", "MADEIRA_PRELOAD_DLLS",
+        "MADEIRA_STEAM_APPID", "MADEIRA_STEAM_APPPATH", "MADEIRA_WORKDIR",
+        "CFFIXED_USER_HOME", "HOME", "PATH", "TMPDIR",
+        "WINEDLLOVERRIDES", "WINEDLLPATH", "WINEHOME", "WINELOADER", "WINEPATH", "WINEPREFIX", "WINESERVER",
+    ]
+    static let launchEnvironmentPrefixes = ["DYLD_", "LD_", "FEX_THUNK", "FEX_ROOTFS"]
+    /// Names that end like a path, a program or arguments; these two are plain switches.
+    static let launchEnvironmentSuffixes = ["_ARGS", "_CMDLINE", "_DIR", "_DYLIB", "_EXE", "_EXECUTABLE", "_FILE", "_LIBRARY", "_MODULE", "_PATH", "_PROGRAM"]
+    static let launchEnvironmentSwitches: Set<String> = ["MADEIRA_EA_CEF_CMDLINE", "MADEIRA_VDCFG_PATH"]
+
+    static func isLaunchEnvironmentKey(_ name: String) -> Bool {
+        let key = name.uppercased()
+        if launchEnvironmentSwitches.contains(key) { return false }
+        return launchEnvironmentKeys.contains(key) || launchEnvironmentPrefixes.contains { key.hasPrefix($0) }
+            || launchEnvironmentSuffixes.contains { key.hasSuffix($0) }
+    }
+
+    /// A shared setup's config without the lines that set one of those variables, and the lines
+    /// it took out. Lines are split as the bridge splits them (every Unicode line break, so one
+    /// hidden after a comment on the same Swift "line" is seen), and a name is read with
+    /// anything but its ASCII letters, digits and underscores left out. A config with nothing to
+    /// remove comes back unchanged, byte for byte.
+    static func launchSafeConfig(_ text: String) -> (kept: String, removed: [String]) {
+        var kept: [String] = []
+        var removed: [String] = []
+        for line in text.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if !trimmed.hasPrefix("#"), let eq = trimmed.firstIndex(of: "=") {
+                let name = String(trimmed[..<eq].unicodeScalars.filter {
+                    $0.isASCII && (CharacterSet.alphanumerics.contains($0) || $0 == "_" || $0 == ".")
+                }.map { Character($0) })
+                if name.lowercased().hasPrefix("env."), isLaunchEnvironmentKey(String(name.dropFirst(4))) {
+                    removed.append(trimmed)
+                    continue
+                }
+            }
+            kept.append(line)
+        }
+        return removed.isEmpty ? (text, []) : (kept.joined(separator: "\n"), removed)
     }
 
     /// One line for a chat: textPrefix, then the JSON, compressed where the system can.
@@ -282,9 +333,9 @@ struct GameSetup {
         if let folder = text("steamProgramFolder") { out.append("Steam working folder: " + folder) }
         if let arguments = text("steamProgramArguments") { out.append("Steam program arguments: " + arguments) }
         if (entry["startServices"] as? Bool) == true { out.append("Starts Windows services (services.exe) before the game") }
-        // WineProcessBridge exports env.NAME lines over what the library set, MADEIRA_EXE and MADEIRA_ARGS too.
+        // Those that choose what starts or what loads never get this far (launchSafeConfig).
         let variables = configLines.filter { $0.hasPrefix("env.") }.count
-        if variables > 0 { out.append("Sets \(variables) environment variable(s), which can change what starts: read Config lines") }
+        if variables > 0 { out.append("Sets \(variables) environment variable(s): read Config lines") }
         return out
     }
 
@@ -304,7 +355,7 @@ struct GameSetup {
 
     /// The config lines a setup writes, comments left out, for the apply sheet to show.
     var configLines: [String] {
-        config.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
+        config.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty && !$0.hasPrefix("#") }
     }
 
@@ -390,7 +441,7 @@ extension GameSetup {
         try updated.validate()
         let path = entry.windowsPath
         let profile = GameProfile(windowsPath: path)
-        profile.text = config
+        profile.text = Self.launchSafeConfig(config).kept   // already so for a setup that was read
         LibraryPrefs.applySharedSwitches(switches, for: path)
         var written = 0
         if applyIni {
@@ -541,6 +592,18 @@ struct GameSetupApplySheet: View {
                 } footer: {
                     if otherGame {
                         Text("This setup was made for \(setup.title). It may not suit \(gameTitle).")
+                            .foregroundStyle(.orange)
+                    }
+                }
+                if !setup.removedConfigLines.isEmpty {
+                    Section {
+                        ForEach(Array(setup.removedConfigLines.enumerated()), id: \.offset) {
+                            Text($0.element).font(.caption.monospaced()).textSelection(.enabled)
+                        }
+                    } header: {
+                        Text("Removed from this setup")
+                    } footer: {
+                        Text("These lines would choose what starts or which libraries load. A shared setup cannot set them, so Madeira left them out.")
                             .foregroundStyle(.orange)
                     }
                 }

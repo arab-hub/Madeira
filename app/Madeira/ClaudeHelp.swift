@@ -88,6 +88,18 @@ enum ClaudeHelp {
         return out
     }
 
+    /// Just the logs: the summary, the last log with a game in it and this run's log, each as
+    /// the app wrote it (command lines go through build/madeira_redact.h on their way into a
+    /// log). `previous`: also the last run's, for a session that ended without coming back.
+    static func logFiles(previous: Bool = false) -> [URL] {
+        let fm = FileManager.default
+        guard let docs = documents else { return [] }
+        let names = [LogSummary.fileName, LogSummary.gameLogName, "madeira-log.txt"] + (previous ? ["madeira-log.prev.txt"] : [])
+        let out = names.map { docs.appendingPathComponent($0) }.filter { fm.fileExists(atPath: $0.path) }
+        LogStore.shared.log("[share-logs] share: \(out.map(\.lastPathComponent).joined(separator: ", "))")
+        return out
+    }
+
     /// The game's own config, then its Game details settings, as plain text.
     static func gameText(_ entry: LibraryEntry) -> String {
         var lines = [
@@ -152,5 +164,48 @@ struct ClaudeHelpButton: View {
             files = ClaudeHelpFiles(urls: ClaudeHelp.files(for: entry))
         }
         .sheet(item: $files) { ActivitySheet(items: $0.urls) }
+    }
+}
+
+/// "Share logs": the logs alone, through the system share sheet. Settings, the in-game menu
+/// and the error screens offer it; the log files stay where they are.
+struct ShareLogsButton: View {
+    var previous = false
+    @State private var files: ClaudeHelpFiles?
+    var body: some View {
+        Button("Share logs", systemImage: "square.and.arrow.up") {
+            files = ClaudeHelpFiles(urls: ClaudeHelp.logFiles(previous: previous))
+        }
+        .sheet(item: $files) { ActivitySheet(items: $0.urls) }
+    }
+    /// What a log holds, for a line under the button.
+    static let note = "Logs name your games, their folders and this device's model. Sign-in tokens on command lines are hidden when a log is written."
+}
+
+/// On the library: once, the summary of a session that ended without returning to it.
+struct LastSessionReportPresenter: ViewModifier {
+    @ObservedObject private var last = LastSessionReport.shared
+    func body(content: Content) -> some View {
+        content.sheet(item: $last.report) { report in
+            NavigationStack {
+                Form {
+                    Section {
+                        Text("Madeira closed while \(report.game) was running.")
+                        ShareLogsButton(previous: true)
+                    } footer: {
+                        Text(ShareLogsButton.note)
+                    }
+                    if !report.summary.isEmpty {
+                        Section("Summary") {
+                            Text(report.summary).font(.caption.monospaced()).textSelection(.enabled)
+                        }
+                    }
+                }
+                .navigationTitle("Last session").navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) { Button("Done") { last.report = nil } }
+                }
+            }
+        }
     }
 }

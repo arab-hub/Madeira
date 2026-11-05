@@ -386,14 +386,20 @@ struct OnboardingView: View {
             header("Set up JIT", symbol: "bolt.fill")
             Text("JIT lets Madeira run Windows code. Choose how your \(device) gets it.")
             VStack(spacing: 12) {
-                jitChoice("In-app", symbol: "iphone.radiowaves.left.and.right",
-                          detail: !OnDevicePairing.isSupported ? "Needs iOS 27 or later."
-                              : pairedOnDevice ? "Paired on this \(device)."
-                              : "Pair this \(device) with Madeira in Settings. No computer needed.",
-                          done: pairedOnDevice, enabled: OnDevicePairing.isSupported) { choose(.onDevice) }
-                jitChoice("In-app with pairing file", symbol: "doc.badge.plus",
-                          detail: fileImported ? "Pairing file imported." : "Use a pairing file made on a computer.",
-                          done: fileImported) { choose(.pairingFile) }
+                // Both in-app ways use the built-in helper, which cannot run inside LiveContainer.
+                if !LiveContainerEnv.isLiveContainer {
+                    jitChoice("In-app", symbol: "iphone.radiowaves.left.and.right",
+                              detail: !OnDevicePairing.isSupported ? "Needs iOS 27 or later."
+                                  : pairedOnDevice ? "Paired on this \(device)."
+                                  : "Pair this \(device) with Madeira in Settings. No computer needed.",
+                              done: pairedOnDevice, enabled: OnDevicePairing.isSupported) { choose(.onDevice) }
+                    jitChoice("In-app with pairing file", symbol: "doc.badge.plus",
+                              detail: fileImported ? "Pairing file imported." : "Use a pairing file made on a computer.",
+                              done: fileImported) { choose(.pairingFile) }
+                } else {
+                    Text("Madeira is running inside LiveContainer, where its in-app JIT helper is unavailable. Use StikDebug.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
                 jitChoice("StikDebug", symbol: "ant",
                           detail: "Enable JIT with the StikDebug app.",
                           done: jit.method == .stikDebug) { choose(.stikDebug) }

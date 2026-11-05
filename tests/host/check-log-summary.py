@@ -148,6 +148,16 @@ let healthyWindowText = LogSummary.text(healthyWindow, source: "test")
 assert(healthyWindowText.contains("Problems found: none") && !healthyWindowText.contains("could not reserve"))
 assert(!text.contains("could not be allocated") && !text.contains("could not reserve"))
 
+// The Wine server's fatal error: the bind refusal names the hang it causes.
+let fatal = LogSummary.facts(lines: [
+    "[12:00:00.000] [Wine] FATAL: bind: Operation not permitted",
+    "[12:00:01.000] [Wine] FATAL: later",
+])
+let fatalText = LogSummary.text(fatal, source: "test")
+assert(fatal.sawSession && fatal.serverFatal == "bind: Operation not permitted" && !LogSummary.problems(fatal).isEmpty)
+assert(fatalText.contains("The Wine server stopped: bind: Operation not permitted.") && fatalText.contains("request_fd"))
+assert(!healthyWindowText.contains("The Wine server stopped"))
+
 // A launch with no session leaves the last summary alone; a file is read across 1 MB chunks.
 let dir = URL(fileURLWithPath: CommandLine.arguments[1])
 let empty = dir.appendingPathComponent("empty.txt"), logFile = dir.appendingPathComponent("madeira-log.txt")

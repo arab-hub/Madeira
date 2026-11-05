@@ -192,11 +192,11 @@ struct LibraryEntry: Codable, Identifiable {
     /// desktop size. ml1172: new entries default to this screen's shape at
     /// 1280x720's pixel count (ResolutionChoices: 1408x648 on a 19.5:9 iPhone,
     /// as before, and 1152x800 on an 11-inch iPad, where a fixed 1408x648 left bars).
-    var resolution = ResolutionChoices.defaultValue
+    var resolution: String = LibraryEntry.NewGame.resolution
     /// How the monitor is scaled to the screen (DisplayMode raw value; nil = Fit).
     var display: String?
     /// FPS limit: 1 = 60, 3 = 30, 4 = 40, 0 = display maximum, 2 = uncapped (madeira_set_vsync_locked).
-    var fpsMode = 1
+    var fpsMode: Int = LibraryEntry.NewGame.fpsMode
     /// FEX's X87ReducedPrecision for this game: true exports 1 (reduced, fast).
     /// false leaves the engine's default unless `fullX87` asks for full precision:
     /// the 32-bit (WOW64) module runs reduced by default (ml950: full precision
@@ -218,9 +218,28 @@ struct LibraryEntry: Codable, Identifiable {
             fullX87 = newValue == .full ? true : nil
         }
     }
-    var liveLogs = false
-    var performance = false
-    var touchControls = false
+    var liveLogs: Bool = LibraryEntry.NewGame.bool(LibraryEntry.NewGame.Field.liveLogs)
+    var performance: Bool = LibraryEntry.NewGame.bool(LibraryEntry.NewGame.Field.performance)
+    var touchControls: Bool = LibraryEntry.NewGame.bool(LibraryEntry.NewGame.Field.touchControls)
+    /// Settings › Defaults for new games: what a new entry starts with. Only the memberwise
+    /// initializer uses these; a saved entry decodes its own values. Game recommendations
+    /// are layered on top (GameRecommendations.prepare). Nothing chosen: the old defaults.
+    enum NewGame {
+        enum Field: String, CaseIterable {
+            case performance, touchControls, liveLogs, fpsMode, resolution
+            var key: String { "madeira.newGame." + rawValue }
+        }
+        static func bool(_ field: Field) -> Bool { UserDefaults.standard.bool(forKey: field.key) }
+        /// 1 is the 60 FPS limit, as before.
+        static var fpsMode: Int { UserDefaults.standard.object(forKey: Field.fpsMode.key) as? Int ?? 1 }
+        static var resolution: String {
+            let chosen = UserDefaults.standard.string(forKey: Field.resolution.key) ?? ""
+            return chosen.isEmpty ? ResolutionChoices.defaultValue : chosen
+        }
+    }
+    /// This game's pointer mode ("absolute", "relative" or "touch"); nil follows Settings ›
+    /// Pointer (InputSettings.applyGamePointerMode). Optional, so older files decode.
+    var pointerMode: String?
     var controls: [TouchControl]?
     /// The named layout (TouchControlPresets.swift) `controls` came from, so the
     /// Session menu shows it and an edit is written back to it; nil for controls
@@ -1106,6 +1125,9 @@ final class LibraryModel: ObservableObject {
     /// seconds: a frozen program never handles Alt+F4, so the menu offers to close Madeira.
     @Published var forceCloseOffered = false
     static let forceCloseAfter: TimeInterval = 10
+    /// The Wine server thread ended on a fatal error in this session (ContentView.reportServerFatal):
+    /// the game never had a chance to answer Quit game, and the force close says so.
+    @Published var serverStopped = false
     /// A Dock session whose game ended: Madeira Dock shut Valve's client down, and
     /// explorer's desktop is asked to close so the session returns to the library.
     /// Close Madeira is offered if the session is still up `forceCloseAfter` seconds later.
@@ -1121,6 +1143,10 @@ final class LibraryModel: ObservableObject {
     var launchStartedAt: Date { launchStarted }
     @Published var launchSlow = false
     @Published var launchLogs = false
+    /// A start still going after 30 s: what the log says so far, for the starting screen.
+    @Published var launchProblems: [String] = []
+    private var launchProblemsRead = Date.distantPast
+    private var launchProblemsBusy = false
     private var launchDismissLogged = false
     var menuButtonRect = CGRect.zero
     var performanceRect = CGRect.zero
@@ -1138,8 +1164,11 @@ final class LibraryModel: ObservableObject {
         guard wine_crash_exit_status(&status) != 0 else { return nil }
         LogStore.shared.log("[exit-report] status=0x\(String(status, radix: 16))")
         let kind = status == 0xC0000005 ? " (memory access violation)" : status == 0xC0000017 ? " (out of memory)" : ""
-        return "The game stopped with Windows error 0x\(String(status, radix: 16, uppercase: true))\(kind). Export the diagnostic log to report it."
+        return Self.crashWords + "0x\(String(status, radix: 16, uppercase: true))\(kind). Export the diagnostic log to report it."
     }
+    /// How exitReport's message starts: the library's alert offers Share logs with it.
+    private static let crashWords = "The game stopped with Windows error "
+    var errorOffersLogs: Bool { error?.hasPrefix(Self.crashWords) == true }
     /// A game in a Madeira Dock session asked Steam to start another game (steam://run/<App ID>;
     /// ntdll refused steam.exe and reported it, WineProcessBridge.m): the next app run starts that
     /// game (NextSteamApp), since a second session cannot start in this one. Black Ops II's
@@ -1483,6 +1512,41 @@ final class LibraryModel: ObservableObject {
         saveCurrentProfile()
         if !readOnly { LibraryFileWriter.finishWrites(entries, to: file) }
         wineserver_flush_for_exit()
+        LogStore.shared.sessionEnded()   // closed on purpose: nothing to offer at the next launch
+        UserDefaults.standard.synchronize()   // exit() is next
+    }
+
+    /// Settings › Defaults for new games › Apply to all games: only `fields` change, on every
+    /// game (not the Desktop or Big Picture). Returns how many entries were written.
+    @discardableResult
+    func applyNewGameDefaults(_ fields: Set<LibraryEntry.NewGame.Field>) -> Int {
+        guard !readOnly else { error = "The library file could not be read. Preserve or repair it before making changes."; return 0 }
+        var next = entries
+        var changed = 0
+        for i in next.indices where next[i].desktop != true && next[i].bigPicture != true {
+            if fields.contains(.performance) { next[i].performance = LibraryEntry.NewGame.bool(.performance) }
+            if fields.contains(.touchControls) { next[i].touchControls = LibraryEntry.NewGame.bool(.touchControls) }
+            if fields.contains(.liveLogs) { next[i].liveLogs = LibraryEntry.NewGame.bool(.liveLogs) }
+            if fields.contains(.fpsMode) { next[i].fpsMode = LibraryEntry.NewGame.fpsMode }
+            if fields.contains(.resolution) { next[i].resolution = LibraryEntry.NewGame.resolution }
+            changed += 1
+        }
+        guard changed > 0, persist(next) else { return 0 }
+        LogStore.shared.log("[library] new-game defaults applied to \(changed) games: \(fields.map(\.rawValue).sorted().joined(separator: ","))")
+        return changed
+    }
+
+    /// A backup's library file, decoded as a start-up would read it; throws when it would not load.
+    static func decodeLibrary(_ data: Data) throws -> [LibraryEntry] {
+        let doc = try JSONDecoder().decode(Document.self, from: data)
+        guard doc.version == 1 else { throw LibraryError.message("This library uses a newer format.") }
+        return doc.entries
+    }
+
+    /// Restore's end: the library from a backup replaces this one, on screen and in the file.
+    @discardableResult
+    func replaceEntries(_ next: [LibraryEntry]) -> Bool {
+        persist(next, wait: true)
     }
 
     /// Install size and graphics API, at most once a day per entry.
@@ -1792,6 +1856,9 @@ final class LibraryModel: ObservableObject {
         JITPoolMeter.reset(); smallPoolNoted = false
         quitRequested = false
  quitRequestedAt = nil; forceCloseOffered = false; dockGameEnded = false; dockGameEndedAt = nil
+        serverStopped = false; launchProblems = []; launchProblemsRead = .distantPast
+        LogStore.shared.sessionBegan(game: entry.title)
+        InputSettings.shared.applyGamePointerMode(entry.pointerMode)
         LibraryController.shared.configure(enabled: enabled, ownsInput: false)
         Self.sessionsThisRun += 1
         launchPresent = madeira_frame_count(); launchStarted = Date(); launchSlow = false; launchLogs = entry.liveLogs
@@ -1857,6 +1924,7 @@ final class LibraryModel: ObservableObject {
                 showGameView(reason: "surface")
             } else if Date().timeIntervalSince(launchStarted) > 30 { launchSlow = true }
         }
+        if launching && launchSlow { refreshLaunchProblems() }
         // iPadOS gave the JIT pool less room than asked at launch: say so once the game is up.
         if !smallPoolNoted, !launching, current != nil, JITPoolMeter.current.shrunk {
             smallPoolNoted = true
@@ -1895,6 +1963,29 @@ final class LibraryModel: ObservableObject {
             MetalBackedView.refreshDisplayMode(reason: "first-present")
         }
     }
+    /// The problems LogSummary finds in this run's log so far, and the Wine server's fatal
+    /// message if the log lacks it. Off the main thread (the log can be long), every 15 s at most.
+    private func refreshLaunchProblems() {
+        guard !launchProblemsBusy, Date().timeIntervalSince(launchProblemsRead) >= 15 else { return }
+        launchProblemsBusy = true; launchProblemsRead = Date()
+        let log = LogStore.shared.logURL
+        let fatal = wineserver_fatal_message().map { String(cString: $0) }
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let found = LogSummary.facts(fromFileAt: log).map { LogSummary.problems($0) } ?? []
+            let lead: [String]
+            if let fatal, !found.contains(where: { $0.contains(fatal) }) {
+                lead = [LogSummary.serverFatalWords(fatal)]
+            } else {
+                lead = []
+            }
+            let problems = lead + found
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.launchProblemsBusy = false
+                if self.launching { self.launchProblems = problems }
+            }
+        }
+    }
     /// `reason`: what stopped the launch, when the caller knows (the JIT pool's failure).
     /// `offerJIT`: the launch failed because no debugger is attached, so the alert
     /// offers Enable JIT instead of only reporting.
@@ -1918,8 +2009,20 @@ final class LibraryModel: ObservableObject {
     }
     func toggleLaunchLogs() {
         launchLogs.toggle()
+        // Hide live log also keeps the in-game overlay off, and is saved to the game.
+        if !launchLogs, liveLogs, current != nil {
+            liveLogs = false
+            saveCurrentProfile()
+        }
         LogStore.shared.setDisplayActive(launching ? launchLogs : liveLogs)
         fputs("[startup-log] visible=\(launchLogs ? 1 : 0)\n", stderr)
+    }
+    /// The in-game menu's Live logs: at once, and saved to the game.
+    func setLiveLogs(_ on: Bool) {
+        liveLogs = on
+        LogStore.shared.setDisplayActive(launching ? launchLogs : on)
+        saveCurrentProfile()
+        fputs("[session-log] live logs=\(on ? 1 : 0)\n", stderr)
     }
 
     /// Hand the session's mode to the pad sampler. In keyboard-and-mouse mode the
@@ -1976,8 +2079,10 @@ final class LibraryModel: ObservableObject {
             entry.zones = GestureZonesModel.shared.zones
             if ControlPresetsModel.enabled { entry.controlLayout = controls.layoutID }
             entry.touchControls = controls.visible
-            entry.fpsMode = fpsMode; entry.performance = performance
+            entry.fpsMode = fpsMode; entry.performance = performance; entry.liveLogs = liveLogs
             entry.overlayFields = overlayFields
+            // A game with its own pointer mode keeps what the in-game menu chose; one without follows Settings.
+            if entry.pointerMode != nil { entry.pointerMode = InputSettings.shared.currentPointerMode }
             entry.controlOpacity = opacity; entry.controlSize = controls.sizeScale
             if GamepadInput.keyboardMouseAvailable { entry.controllerMode = controllerMode }
             if GamepadInput.keyboardMouseAvailable { entry.controllerBinds = controllerBinds.isEmpty ? nil : controllerBinds }
@@ -1994,6 +2099,9 @@ final class LibraryModel: ObservableObject {
         else if sawProcess, let report = exitReport() { error = report }
         timer?.invalidate(); timer = nil
         saveCurrentProfile()
+        LogStore.shared.sessionEnded()
+        InputSettings.shared.applyGamePointerMode(nil)
+        serverStopped = false; launchProblems = []
         controllerMode = nil
         controllerBinds = [:]
         padMouseVertical = 1
@@ -2978,9 +3086,15 @@ struct LibraryStatus: View {
                 }
             }
             if !memory {
-                Text("Memory+ requires the Increased Memory Limit entitlement in this signed copy of Madeira. Enabling JIT does not grant it. Check that your signing tool enables this capability for Madeira, then sign and install the updated app without deleting your existing installation.")
-                    .font(.footnote).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                if LiveContainerEnv.isLiveContainer {
+                    Text("Madeira is running inside LiveContainer, and this check reads the entitlements of the running process: LiveContainer's, not Madeira's. The Increased Memory Limit capability has to be on the copy of LiveContainer you signed. Enabling JIT does not grant it.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Text("Memory+ requires the Increased Memory Limit entitlement in this signed copy of Madeira. Enabling JIT does not grant it. Check that your signing tool enables this capability for Madeira, then sign and install the updated app without deleting your existing installation.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
         .onAppear { update() }.onReceive(ticks) { _ in update() }
@@ -2997,6 +3111,31 @@ struct LibraryStatus: View {
         .accessibilityElement(children: .ignore).accessibilityLabel("\(label): \(enabled ? "enabled" : "unavailable")")
     }
     private func update() { jit = StikJITHelper.ready; memory = EntitlementStatus.check().increasedMemory }
+}
+
+/// Under Play on Game details: what is missing before a start (LibraryDetail checks every
+/// 2 s, like LibraryStatus). Nothing shows while JIT and Memory+ are both there.
+struct LibraryReadinessNote: View {
+    let jit: Bool
+    let memory: Bool
+    var body: some View {
+        if !jit || !memory {
+            Section {
+                if !jit {
+                    Label(LiveContainerEnv.isLiveContainer
+                          ? "JIT is off. Inside LiveContainer, Madeira can only enable it through StikDebug."
+                          : "JIT is off. Play tries to enable it first.", systemImage: "bolt.slash")
+                        .font(.footnote).foregroundStyle(.orange)
+                }
+                if !memory {
+                    Label(LiveContainerEnv.isLiveContainer
+                          ? "Memory+ is missing on the copy of LiveContainer you signed. iOS may close large games."
+                          : "Memory+ is missing from this signed copy of Madeira. iOS may close large games.", systemImage: "memorychip")
+                        .font(.footnote).foregroundStyle(.orange)
+                }
+            }
+        }
+    }
 }
 
 /// A section title with a count; with `collapsed` set, tapping the title
@@ -3321,7 +3460,7 @@ struct LibraryGroupedGames<LocalCell: View>: View {
         VStack(alignment: .leading, spacing: 24) {
             if groups.isEmpty {
                 if search.isEmpty {
-                    ContentUnavailableView("Make yourself at home", systemImage: "gamecontroller", description: Text("Copy a game's folder into Madeira › wine › drive_c with the Files app, then tap + and choose its .exe."))
+                    ContentUnavailableView("Make yourself at home", systemImage: "gamecontroller", description: LiveContainerEnv.isLiveContainer ? Text(LiveContainerEnv.emptyLibraryText) : Text("Copy a game's folder into Madeira › wine › drive_c with the Files app, then tap + and choose its .exe."))
                 } else {
                     Text("No games match your search.").foregroundStyle(.secondary)
                 }
@@ -3415,6 +3554,8 @@ struct LibraryView: View {
     @State private var restartNotice = false
     @State private var settingsSheet: SettingsSheet?
     @State private var settingsRefresh = 0
+    /// The error alert's Share logs (a game that stopped with a Windows error).
+    @State private var logsToShare: ClaudeHelpFiles?
     @AppStorage("madeiraLibraryLayout") private var layout = "cards"
     /// The new grid (LibraryGridPage.swift): off by default, and its stored size (a position on the levels).
     @AppStorage(LibraryGridArm.key) private var zoomableGrid = false
@@ -3497,8 +3638,17 @@ struct LibraryView: View {
         .alert(jitProblem == nil ? L("Library") : L("Couldn't Enable JIT"),
                isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })) {
             if let jitProblem { jitConnectionActions(jitProblem, retry: enableJIT) { model.error = nil } }
+            if model.errorOffersLogs {
+                Button("Share logs") {
+                    model.error = nil
+                    logsToShare = ClaudeHelpFiles(urls: ClaudeHelp.logFiles())
+                }
+            }
             Button("OK", role: .cancel) { model.error = nil }
         } message: { Text(model.error ?? "") }
+        .sheet(item: $logsToShare) { ActivitySheet(items: $0.urls) }
+        // A session that ended without returning to the library last time (LogStore).
+        .modifier(LastSessionReportPresenter())
         // Signing that runs out: the refresh, and the offer when it could not run (SigningRefresh.swift).
         .modifier(SigningRefreshOffer())
         // A setup opened from Files, a chat or a madeira://setup link (GameSetupShare.swift).
@@ -3562,7 +3712,14 @@ struct LibraryView: View {
                 }
             } label: { Label("Library options", systemImage: "line.3.horizontal.decrease") }
         }
-        ToolbarItem(placement: .topBarTrailing) { Button { browser = true } label: { Label("Add executable", systemImage: "plus") } }
+        // Add a game: a program already in drive_c, or a folder or archive brought in first (LibraryImporter).
+        ToolbarItem(placement: .topBarTrailing) {
+            Menu {
+                Button { browser = true } label: { Label("Choose .exe", systemImage: "app.dashed") }
+                Button { LibraryImporter.shared.pick(.folder) } label: { Label("Import folder", systemImage: "folder.badge.plus") }
+                Button { LibraryImporter.shared.pick(.archive) } label: { Label("Import .zip/.7z", systemImage: "doc.zipper") }
+            } label: { Label("Add executable", systemImage: "plus") }
+        }
     }
     @ToolbarContentBuilder private var settingsToolbar: some ToolbarContent {
         ToolbarItem(placement: .topBarTrailing) {
@@ -3611,6 +3768,8 @@ struct LibraryView: View {
                     Toggle("Extended logging", isOn: $input.diagnostics)
                     // ClaudeHelp.swift: the fixes guide, logs and madeira.cfg to a chat.
                     ClaudeHelpButton(entry: nil)
+                    ShareLogsButton()
+                    Text(ShareLogsButton.note).font(.caption).foregroundStyle(.secondary)
                 } header: { Text("Diagnostics") } footer: {
                     Text("Get Help from Claude shares a guide to known fixes, the last logs and madeira.cfg. For one game's config too, use the button on its Game details page.")
                 }
@@ -3644,7 +3803,10 @@ struct LibraryView: View {
             if settingsShow(".NET", "Mono", "Wine Mono", "framework", "download") { WineMonoSettingsSection() }
             if VCRedistModel.enabled, settingsShow("Visual C++", "C++", "runtime", "redist", "vcredist", "download") { VCRedistSettingsSection() }
             if settingsShow("Gecko", "Wine Gecko", "web", "HTML", "Internet Explorer", "download") { WineGeckoSettingsSection() }
-            if settingsShow("saves", "backup", "restore", "save games") { SavesSection() }
+            if settingsShow("saves", "backup", "restore", "save games", "Madeira settings") { SavesSection() }
+            if settingsShow("storage", "free space", "size", "logs", "cache", "covers", "shader") { StorageSection() }
+            if settingsShow("defaults", "new games", "apply to all") { NewGameDefaultsSection() }
+            if LibraryView.runtimeSettingsShown, settingsShow("experiments", "performance", "server", "memory") { PerformanceExperimentsSettings() }
             if settingsShow("external", "drive", "USB", "SSD", "storage") { ExternalDrivesSection() }
             if settingsShow("appearance", "liquid metal", "metal", "glass") {
                 Section {
@@ -3740,9 +3902,13 @@ struct LibraryView: View {
                                 EmptyView()
                             } else if entries.isEmpty {
                                 Text(search.isEmpty
-                                     ? "Copy a game's folder into Madeira › wine › drive_c with the Files app, then tap + and choose its .exe."
+                                     ? (LiveContainerEnv.isLiveContainer ? LiveContainerEnv.emptyLibraryText
+                                        : "Copy a game's folder into Madeira › wine › drive_c with the Files app, then tap + and choose its .exe.")
                                      : L("No other games match your search."))
                                     .foregroundStyle(.secondary)
+                                if search.isEmpty {
+                                    Text("Or tap + to import a folder, a .zip or a .7z.").font(.footnote).foregroundStyle(.secondary)
+                                }
                             } else {
                                 cells(entries, width: viewport.size.width)
                             }
@@ -3755,7 +3921,7 @@ struct LibraryView: View {
                 } else if !tab.shows(.other) {
                     EmptyView()
                 } else if model.entries.filter({ $0.desktop != true && $0.listedInLibrary && $0.steamAppID == nil && $0.epicAppName == nil && $0.gogProductID == nil && $0.itchGameID == nil && $0.eaOfferID == nil }).isEmpty {
-                    ContentUnavailableView("Make yourself at home", systemImage: "gamecontroller", description: Text("Copy a game's folder into Madeira › wine › drive_c with the Files app, then tap + and choose its .exe."))
+                    ContentUnavailableView("Make yourself at home", systemImage: "gamecontroller", description: LiveContainerEnv.isLiveContainer ? Text(LiveContainerEnv.emptyLibraryText) : Text("Copy a game's folder into Madeira › wine › drive_c with the Files app, then tap + and choose its .exe."))
                 } else {
                     cells(entries, width: viewport.size.width)
                 }
@@ -3943,10 +4109,24 @@ private struct LibrarySheets: ViewModifier {
     @Binding var selected: LibraryEntry?
     var play: (LibraryEntry) -> Void
     @ObservedObject var jit: JITCoordinator
+    @ObservedObject var importer = LibraryImporter.shared
+    /// Where Add executable opens: an import's new folder, else drive_c.
+    @State var browserFolder: URL? = nil
     func body(content: Content) -> some View {
         content
-            .sheet(isPresented: $browser) {
-                NavigationStack { ExecutableBrowser(folder: LibraryModel.drive) { entry in
+            .fileImporter(isPresented: $importer.picking,
+                          allowedContentTypes: importer.allowedTypes) { result in
+                switch result {
+                case .success(let url): importer.begin(url)
+                case .failure(let failure): importer.failed(failure.localizedDescription)
+                }
+            }
+            .sheet(isPresented: $importer.sheetShown, onDismiss: {
+                // Imported: on to choosing its program, the same page as +.
+                if let folder = importer.takeFinished() { browserFolder = folder; browser = true }
+            }) { LibraryImportSheet() }
+            .sheet(isPresented: $browser, onDismiss: { browserFolder = nil }) {
+                NavigationStack { ExecutableBrowser(folder: browserFolder ?? LibraryModel.drive) { entry in
                     // madeira-bcd: the page shows the entry as stored, with its recommended settings.
                     model.save(entry); browser = false; selected = model.entries.first { $0.id == entry.id } ?? entry
                 } }
@@ -3994,7 +4174,13 @@ struct ExecutableBrowser: View {
                     }
                 }
             }
-            if files.isEmpty && error == nil { Text("No executables here. Copy files into Madeira/wine/drive_c using Files.").foregroundStyle(.secondary) }
+            if files.isEmpty && error == nil {
+                if LiveContainerEnv.isLiveContainer {
+                    Text(LiveContainerEnv.emptyLibraryText).foregroundStyle(.secondary)
+                } else {
+                    Text("No executables here. Copy files into Madeira/wine/drive_c using Files.").foregroundStyle(.secondary)
+                }
+            }
         }.navigationTitle(folder.lastPathComponent)
         .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } } }
         .task {
@@ -4035,6 +4221,13 @@ struct LibraryDetail: View {
     @State private var bcd = BCDGameValues()
     @State private var findCover = false
     @State private var remove = false
+    /// What LibraryReadinessNote says under Play; true until the first check.
+    @State private var hasJIT = true
+    @State private var hasMemory = true
+    let readinessTicks = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
+    private func checkReadiness() { hasJIT = StikJITHelper.ready; hasMemory = EntitlementStatus.check().increasedMemory }
+    /// Also delete game files: the folder, once the second question is answered (GameFolderRemoval).
+    @State private var folderToDelete: URL?
     /// madeira-bcd: Madeira's recommended settings for this game, nil for none
     /// (GameRecommendations.swift), and the question before Reset to Recommended.
     @State private var recommended: GameRecommendation?
@@ -4098,6 +4291,31 @@ struct LibraryDetail: View {
     private func readSetup(_ read: () throws -> GameSetup) {
         do { setupToApply = GameSetupInbox.Pending(setup: try read()) }
         catch { setupError = error.localizedDescription }
+    }
+    /// Also delete game files: the rules are checked again against the library as it is now,
+    /// the files go off the main thread, and the entry goes once they have.
+    private func deleteGameFolder() {
+        folderToDelete = nil
+        guard let folder = GameFolderRemoval.folder(for: entry, among: model.entries) else {
+            error = "This folder can no longer be deleted: another game uses it."
+            return
+        }
+        leaving = true
+        let id = entry.id
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = Swift.Result { try FileManager.default.removeItem(at: folder) }
+            DispatchQueue.main.async {
+                switch result {
+                case .success:
+                    LogStore.shared.log("[library] deleted a game's folder with its entry: \(folder.lastPathComponent)")
+                    model.remove(id)
+                    dismiss()
+                case .failure(let failure):
+                    leaving = false
+                    error = "The folder could not be deleted: \(failure.localizedDescription)"
+                }
+            }
+        }
     }
     /// "None", or how many keys this game's own config sets.
     static func configSummary(_ config: String?) -> String {
@@ -4351,7 +4569,28 @@ struct LibraryDetail: View {
             LabeledContent("Control size") {
                 Slider(value: Binding(get: { entry.controlSize ?? 1 }, set: { entry.controlSize = $0 }), in: 0.5...2)
             }
+            // A saved layout (TouchControlPresets.swift): its controls become this game's, as
+            // the in-game menu's Controller layout does. "This game's own" keeps them as they are.
+            if ControlPresetsModel.enabled {
+                Picker("Controller layout", selection: Binding(get: {
+                    ControlPresetsModel.shared.store.resolvedID(entry.controlLayout) ?? ""
+                }, set: { id in
+                    guard let preset = ControlPresetsModel.shared.store.preset(id) else { entry.controlLayout = nil; return }
+                    entry.controls = ControlPresetStore.layout(of: preset, screen: ControlPresetsModel.currentScreen())
+                    entry.zones = ControlPresetStore.zones(of: preset)
+                    entry.controlLayout = preset.id
+                })) {
+                    Text("This game's own").tag("")
+                    ForEach(ControlPresetsModel.shared.available) { Text($0.name).tag($0.id) }
+                }
+            }
             Text("Edit buttons from the in-game menu.").font(.caption).foregroundStyle(.secondary)
+            Picker("Pointer mode", selection: Binding(get: { entry.pointerMode ?? "" }, set: { entry.pointerMode = $0.isEmpty ? nil : $0 })) {
+                Text("Use Settings").tag("")
+                Text("Absolute").tag("absolute")
+                Text("Relative").tag("relative")
+                Text("Touch").tag("touch")
+            }
         }
     }
 
@@ -4596,6 +4835,7 @@ struct LibraryDetail: View {
                 }
                 // A Play error sits under Play.
                 if let error { Section { Text(error).foregroundStyle(.red) } }
+                LibraryReadinessNote(jit: hasJIT, memory: hasMemory)
                 // A running update blocks Play: its progress shows here too.
                 if let appID = entry.steamAppID, let download = SteamOwnedLibrary.shared.downloads[appID] {
                     Section { SteamDownloadStatus(download: download) }
@@ -4668,7 +4908,9 @@ struct LibraryDetail: View {
                 migrateEntryOptions()
                 prepareRecommendation()
                 reloadBCD()
+                checkReadiness()
             }
+            .onReceive(readinessTicks) { _ in checkReadiness() }
         }
         .sheet(isPresented: $shareSetup) { GameSetupShareSheet(entry: entry) }
         .sheet(item: $setupToApply) { pending in
@@ -4704,10 +4946,19 @@ struct LibraryDetail: View {
         }
         .confirmationDialog("Remove this library entry? Your executable and saves stay in drive_c.", isPresented: $remove, titleVisibility: .visible) {
             Button("Remove", role: .destructive) { leaving = true; model.remove(entry.id); dismiss() }
+            if let folder = GameFolderRemoval.folder(for: entry, among: model.entries) {
+                Button("Also delete game files", role: .destructive) { folderToDelete = folder }
+            }
+        }
+        .alert("Delete this folder?", isPresented: Binding(get: { folderToDelete != nil }, set: { if !$0 { folderToDelete = nil } })) {
+            Button("Delete and remove", role: .destructive) { deleteGameFolder() }
+            Button("Cancel", role: .cancel) { folderToDelete = nil }
+        } message: {
+            Text("\(LibraryEntry.folder(of: entry.windowsPath)) and everything in it are deleted for good. Saves under C:\\users stay.")
         }
         .onDisappear { if !leaving { model.save(entry) } }
         .onReceive(LibraryController.shared.commands) { command in
-            guard !leaving, !findCover, !importCover, !remove, !confirmReset else { return }
+            guard !leaving, !findCover, !importCover, !remove, !confirmReset, folderToDelete == nil else { return }
             if command == "back" {
                 if path.isEmpty { model.save(entry); dismiss() } else { path.removeLast() }
             }
@@ -5346,6 +5597,12 @@ struct LibraryPointerSettings: View {
         LabeledContent("Touch sensitivity") {
             Slider(value: input.relative ? $input.sensRel : $input.sensAbs, in: 0.1...8)
         }
+        // PadStickMouse (HardwareInput.swift); the developer layout's pointer panel has the same switch.
+        if HardwareInput.enabled {
+            Toggle("Right stick controls mouse", isOn: $input.padRightStickMouse)
+            Text("For games with no controller support. A game that reads the controller already gets the stick.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
     }
 }
 
@@ -5837,6 +6094,7 @@ struct LibraryHUD: View {
                 if model.launchSlow && !dockStart.holding {
                     Button("Show game view") { model.showGameView(reason: "button") }.frame(minHeight: 44)
                 }
+                launchStuck(leading: false)
                 if showLogs && !sideLogs {
                     LibraryLiveLogs().frame(maxWidth: 550).frame(height: compact ? 90 : 120).clipped()
                 }
@@ -5892,6 +6150,7 @@ struct LibraryHUD: View {
                 }
                 .padding(.top, short ? 2 : 6)
                 .modifier(LaunchEntrance(visible: launchVisible, step: 3, rise: CGSize(width: 22, height: 0), still: curtained))
+                launchStuck(leading: true)
                 if showLogs {
                     LibraryLiveLogs().frame(height: min(170, available * 0.3)).frame(maxWidth: 520)
                         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -5928,6 +6187,43 @@ struct LibraryHUD: View {
                     }
                     Text("\(Int(context.date.timeIntervalSince(model.startingSince)))s")
                         .font(.caption.monospacedDigit()).foregroundStyle(.white.opacity(0.4))
+                }
+            }
+        }
+    }
+    /// A start still going after 30 s, or a stopped Dock start: what the log says so far, Share
+    /// logs, and from 30 s Close Madeira, the way out when Wine never answers: the next start
+    /// needs a new app run anyway (LibraryModel.sessionsThisRun).
+    @ViewBuilder private func launchStuck(leading: Bool) -> some View {
+        if model.launching, model.launchSlow || dockStart.failure != nil {
+            VStack(alignment: leading ? .leading : .center, spacing: 8) {
+                if !model.launchProblems.isEmpty {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(Array(model.launchProblems.prefix(4).enumerated()), id: \.offset) { _, problem in
+                                Text(problem).font(.caption).foregroundStyle(.white.opacity(0.8))
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        }
+                    }
+                    .frame(maxWidth: 440).frame(maxHeight: 110)
+                }
+                HStack(spacing: 12) {
+                    ShareLogsButton()
+                    if model.launchSlow {
+                        Button("Close Madeira", systemImage: "xmark.circle") {
+                            LogStore.shared.log("[frontend] closing Madeira from the starting screen after \(Int(Date().timeIntervalSince(model.startingSince))) s", level: .error)
+                            model.prepareForExit()
+                            exit(0)
+                        }
+                    }
+                }
+                .font(.subheadline.weight(.semibold)).buttonStyle(.bordered).tint(.white)
+                .buttonBorderShape(.capsule).frame(minHeight: 44)
+                if model.launchSlow {
+                    Text("A first start can take minutes. Close Madeira stops this start; open Madeira again to retry.")
+                        .font(.caption2).foregroundStyle(.white.opacity(0.6))
+                        .multilineTextAlignment(leading ? .leading : .center).frame(maxWidth: 440, alignment: leading ? .leading : .center)
                 }
             }
         }
@@ -6083,6 +6379,10 @@ struct LibraryHUD: View {
                 Text("Mouse & pointer").font(.headline)
                 LibraryPointerSettings()
                 Divider()
+                // Applies at once (LogStore.setDisplayActive) and is saved to the game.
+                Toggle("Live logs", isOn: Binding(get: { model.liveLogs }, set: { model.setLiveLogs($0) }))
+                ShareLogsButton()
+                Text(ShareLogsButton.note).font(.caption).foregroundStyle(.secondary)
                 Toggle("Performance overlay", isOn: $model.performance)
                 if model.performance {
                     ForEach(OverlayStyle.fields, id: \.self) { field in
@@ -6139,14 +6439,20 @@ struct LibraryHUD: View {
                         .font(.caption).foregroundStyle(.secondary)
                 } else if model.forceCloseOffered {
                     Button(role: .destructive) {
-                        LogStore.shared.log("[frontend] force close: the program ignored the close request; closing Madeira", level: .error)
+                        LogStore.shared.log(model.serverStopped ? "[frontend] force close: the Wine server stopped; closing Madeira"
+                                            : "[frontend] force close: the program ignored the close request; closing Madeira", level: .error)
                         model.prepareForExit()
                         exit(0)
                     } label: {
                         Label("Force close Madeira", systemImage: "xmark.octagon").foregroundStyle(.red)
                     }.tint(.red)
-                    Text("The game did not respond to Quit game. This closes Madeira at once: unsaved progress, and settings the game changed in this session, are lost.")
-                        .font(.caption).foregroundStyle(.secondary)
+                    if model.serverStopped {
+                        Text("The Wine server stopped, so the game can no longer save or respond. This closes Madeira at once: unsaved progress, and settings the game changed in this session, are lost.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        Text("The game did not respond to Quit game. This closes Madeira at once: unsaved progress, and settings the game changed in this session, are lost.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                 }
             }.frame(maxWidth: .infinity, alignment: .leading).padding(22)
                 .foregroundStyle(.primary)

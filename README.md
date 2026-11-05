@@ -72,6 +72,10 @@ Because JIT needs a debugger, Madeira cannot be offered on the App Store.
 4. In **Settings**, check that **JIT** and **Memory+** both show a green check:
    Madeira then says **Ready to play**.
 
+Running Madeira inside LiveContainer? Its built-in JIT helper is unavailable
+there, so use StikDebug, and Memory+ depends on how LiveContainer itself is
+signed; see [LiveContainer](docs/JIT.md#livecontainer).
+
 Some 64-bit games need Microsoft's Visual C++ runtime, which is not included
 (see [Licensing](#licensing)).
 

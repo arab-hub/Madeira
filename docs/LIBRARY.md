@@ -14,8 +14,16 @@ touch mapping).
 
 ## Adding games
 
-Copy a game's whole folder into **Madeira › wine › drive_c** with the Files app,
-tap **+** and choose its `.exe`, or a `.bat`/`.cmd` batch file (ml1163). Only x86
+Tap **+**. **Import folder** and **Import .zip/.7z** bring a game in from the Files
+app: its files go into a new folder in `drive_c/Games` (a staging copy first, so a
+stopped import leaves nothing), with progress, Cancel and a free-space check, and
+**Choose .exe** then opens on that folder. A .zip or .7z unpacks with the code the
+itch.io downloads use. A folder takes its folders and regular files, not links.
+Inside LiveContainer the empty library says where `drive_c` really is
+([JIT setup](JIT.md#livecontainer)).
+
+Or copy a game's whole folder into **Madeira › wine › drive_c** with the Files app,
+tap **+**, **Choose .exe** and choose its `.exe`, or a `.bat`/`.cmd` batch file (ml1163). Only x86
 and x64 PE executables and batch files inside drive_c can be added; the library
 stores the path relative to drive_c, so a changed app container path does not
 break entries. Adding an entry installs nothing. A batch file gets a **Batch**
@@ -33,7 +41,39 @@ Library data is written atomically to `Documents/madeira-library.json`
 covers chosen from Files are stored as thumbnails in
 `Documents/madeira-art/`. A library file that cannot be read, or that has a
 newer version, is left untouched and cannot be overwritten from the UI.
-Removing an entry never removes the game's files or saves.
+Removing an entry does not remove the game's files or saves unless you choose
+**Also delete game files**, which asks again, naming the folder. It deletes the
+folder the entry's program is in, offered only for a game you added yourself, and
+never drive_c or its shared folders, C:\users or C:\windows, a store's folder,
+anything reached through a link (an external drive), or a folder that holds, or
+lies inside the folder of, another entry (`GameFolderRemoval`).
+
+Settings has three pages for the library as a whole:
+
+- **Defaults for new games**: Performance overlay, Touch controls, Live logs, FPS
+  limit and Resolution for an entry when it is made (`LibraryEntry.NewGame`); a
+  game's recommended settings apply on top. **Apply to all games** puts the settings
+  you tick on every game after a confirmation, and changes nothing else on an entry.
+- **Storage**: free space, each game's size as last measured, and clearing old
+  logs, the cover cache, copies made for sharing and the Direct3D 12 shader cache,
+  each measured and cleared off the main thread (`StorageClearing`).
+- **Performance experiments**: off by default, may hang or break games, and each
+  applies the next time a game starts: **Direct server requests**
+  (`env.MADEIRA_SRV_DIRECT = 1`), **Lower Direct3D 12 memory** (`ring-share = 1`,
+  `pso-lazy-libs = 1`), **Smaller Direct3D 9, 10 and 11 buffers**
+  (`env.DXMT_SMALL_RINGS = 1`). A game's own config line wins.
+
+**Saves and backups** can **Include Madeira settings**: the library,
+`madeira.cfg`, `madeira-control-presets.json` and `GameConfigs` go into the zip
+under `madeira-settings/`. Sign-ins live in the Keychain and are not in those files,
+and a config line whose name reads like a credential is left out. Restoring with
+the switch on checks them first (the library must decode, the layouts must decode)
+and replaces nothing if one is bad; any other path in the archive is ignored.
+
+Applying a shared setup (Game details) drops config lines that set what starts or
+what loads: `env.MADEIRA_EXE`, `MADEIRA_ARGS`, `WINEDLLOVERRIDES`, `DYLD_*` and
+others of the kind (`GameSetup.launchSafeConfig`). The sheet lists what it removed.
+The player's own config is not filtered.
 
 ## Library screen
 
@@ -114,6 +154,12 @@ Removing an entry never removes the game's files or saves.
   `env.MADEIRA_GRAPHICS_SETTINGS = 0` hides it and puts them back.
 
 ## Game details
+
+Under **Play** the page warns when JIT is off or Memory+ is missing. **Controls** also
+has **Controller layout**, a saved layout to give this game, and **Pointer mode**: **Use
+Settings** follows **Settings → Pointer and touch**, the others are this game's alone
+(`LibraryEntry.pointerMode`, saved with what the in-game menu then chooses). **Live
+logs** is in **Advanced** and the in-game menu.
 
 Tapping a game opens its details page; it stays up until the session's
 starting screen takes over (or an error is shown). The Desktop's page has every
@@ -304,7 +350,8 @@ Play applies the profile and runs the same `runWineFullSequence` as the
 developer interface's buttons. The game is shown full screen in either
 orientation. A starting screen with the game's cover stays until the first
 frames arrive (Metal presents or a desktop surface); after 30 seconds it offers
-**Show game view**. A Madeira Dock start keeps it, with the Dock's status,
+**Show game view**, **Close Madeira**, **Share logs** and the problems `LogSummary`
+finds in the log so far, the Wine server's fatal error among them. A Madeira Dock start keeps it, with the Dock's status,
 until the game's own window is shown, and adds **Show desktop**
 (`docs/MADEIRA_DOCK.md`, "Starting screen"). A row of round glyph-only buttons (their words are
 VoiceOver labels) holds **Show live log**, which shows the most recent log lines.
@@ -314,8 +361,15 @@ steamservice, the WoW64 CPU fallback, FEX's code-buffer mprotect note) show in
 grey as "harmless: …" instead of as errors; out of memory (c0000017) never does
 (`tests/host/check-harmless-warnings.py`).
 
+**Hide live log** also keeps the in-game log overlay off, and saves that to the game.
+A launch held by the one-session-per-run rule remembers the game: **Close Madeira**
+on that notice (or swiping Madeira away), and the next open within 30 minutes starts
+it, once (`NextGameAfterRestart`). **Later** forgets it. If Madeira closes on screen
+during a session, the next open offers its summary with **Share logs**.
+
 The small menu button (drag to move; it fades after three seconds) opens the
-in-game menu:
+in-game menu. It also holds **Live logs**, which applies at once and is saved to the
+game, and **Share logs**:
 
 1. touch controls on/off, their **Controller layout** (the built-in Xbox
    controller, the user's custom layouts, **Create new layout**; remembered per
@@ -511,6 +565,9 @@ Log tags: `[onboarding]` (`shown reason=… steps=…`, `step=…`, `done`,
 tags of `docs/STEAM_LIBRARY.md`. No account name, token or path is logged.
 
 ## Memory+ status
+
+Inside LiveContainer this reads LiveContainer's entitlements: see
+[JIT setup](JIT.md#livecontainer).
 
 The **Memory+** badge in Settings reads the signed app's Increased Memory
 Limit entitlement (`com.apple.developer.kernel.increased-memory-limit`).

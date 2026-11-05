@@ -264,7 +264,8 @@ struct LibraryGridPageModel: Equatable {
             return
         } else if inputs.others.isEmpty {
             let text = inputs.search.isEmpty
-                ? "Copy a game's folder into Madeira › wine › drive_c with the Files app, then tap + and choose its .exe."
+                ? (LiveContainerEnv.isLiveContainer ? LiveContainerEnv.emptyLibraryText
+                   : "Copy a game's folder into Madeira › wine › drive_c with the Files app, then tap + and choose its .exe.")
                 : "No other games match your search."
             append(.fixed(.note(id: "others", text: text)), spacing: LibraryGridGeometry.sectionSpacing)
         } else {
@@ -604,7 +605,7 @@ struct LibraryGridPage: View {
         case .notInstalledToggle(let count, _):
             return AnyView(LibraryGridNotInstalledToggle(count: count))
         case .emptyLibrary:
-            return AnyView(ContentUnavailableView("Make yourself at home", systemImage: "gamecontroller", description: Text("Copy a game's folder into Madeira › wine › drive_c with the Files app, then tap + and choose its .exe.")))
+            return AnyView(ContentUnavailableView("Make yourself at home", systemImage: "gamecontroller", description: LiveContainerEnv.isLiveContainer ? Text(LiveContainerEnv.emptyLibraryText) : Text("Copy a game's folder into Madeira › wine › drive_c with the Files app, then tap + and choose its .exe.")))
         case .store(.gog, _):
             return AnyView(GOGGamesSection(search: search, layout: layout, width: width, open: open, inGrid: true))
         case .store(.itch, _):

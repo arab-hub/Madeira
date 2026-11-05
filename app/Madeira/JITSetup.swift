@@ -202,13 +202,24 @@ final class JITCoordinator: ObservableObject {
 
     var resolvedMethod: JITMethod {
         guard method == .automatic else { return method }
+        // The built-in helper cannot run inside LiveContainer (MadeiraBuiltInJIT.unavailableReason).
+        if LiveContainerEnv.isLiveContainer { return .stikDebug }
         return StikJITHelper.isAvailable ? .stikDebug : .builtIn
     }
 
     var automaticDescription: String {
-        StikJITHelper.isAvailable
+        if LiveContainerEnv.isLiveContainer {
+            return StikJITHelper.isAvailable
+                ? "Madeira is inside LiveContainer, where its built-in helper is unavailable, so it will open StikDebug."
+                : "Madeira is inside LiveContainer, where its built-in helper is unavailable, and StikDebug was not detected."
+        }
+        return StikJITHelper.isAvailable
             ? L("StikDebug is installed, so Madeira will open it directly.")
             : L("StikDebug was not detected, so Madeira will use its built-in helper.")
+    }
+    /// The methods offered: Built-in StikJIT not inside LiveContainer, unless it is already chosen.
+    var offeredMethods: [JITMethod] {
+        JITMethod.allCases.filter { $0 != .builtIn || !LiveContainerEnv.isLiveContainer || method == .builtIn }
     }
 
     func refreshPairingStatus() {
@@ -317,7 +328,9 @@ final class JITCoordinator: ObservableObject {
             assertionFailure("Automatic must resolve to a concrete JIT method")
         case .stikDebug:
             guard StikJITHelper.isAvailable else {
-                let message = L("StikDebug is not installed. Install it or choose Built-in StikJIT.")
+                let message = LiveContainerEnv.isLiveContainer
+                    ? "StikDebug was not detected. Built-in StikJIT is unavailable inside LiveContainer, so install StikDebug."
+                    : L("StikDebug is not installed. Install it or choose Built-in StikJIT.")
                 error = message
                 showSetup = true
                 completion(.failure(CoordinatorError.setupRequired(message)))
@@ -545,7 +558,7 @@ struct JITSettingsSection: View {
     var body: some View {
         Section {
             Picker("JIT method", selection: $coordinator.method) {
-                ForEach(JITMethod.allCases) { method in
+                ForEach(coordinator.offeredMethods) { method in
                     Text(method.title).tag(method)
                 }
             }
@@ -604,7 +617,7 @@ struct JITSetupView: View {
             Form {
                 Section {
                     Picker("Method", selection: $coordinator.method) {
-                        ForEach(JITMethod.allCases) { method in
+                        ForEach(coordinator.offeredMethods) { method in
                             Text(method.title).tag(method)
                         }
                     }
@@ -622,7 +635,7 @@ struct JITSetupView: View {
                     Text("Automatic uses StikDebug when it is installed. Madeira does not silently change methods after a failure.")
                 }
 
-                if coordinator.method != .stikDebug {
+                if coordinator.method != .stikDebug && !LiveContainerEnv.isLiveContainer {
                     Section {
                         LabeledContent("Pairing", value: pairingLabel)
                         if OnDevicePairing.isSupported {

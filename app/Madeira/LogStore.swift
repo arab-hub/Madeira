@@ -1,6 +1,18 @@
 import Foundation
 import SwiftUI
 
+/// The session that ended without returning to the library, for the library to offer once
+/// (LastSessionReportPresenter). Apart from LogStore, whose changes rebuild every observer.
+final class LastSessionReport: ObservableObject {
+    static let shared = LastSessionReport()
+    struct Report: Identifiable {
+        let id = UUID()
+        let game: String
+        let summary: String
+    }
+    @Published var report: Report?
+}
+
 final class LogStore: ObservableObject {
     static let shared = LogStore()
 
@@ -92,8 +104,33 @@ final class LogStore: ObservableObject {
         // A session that never returned to the library (a crash, Force close) wrote
         // no madeira-summary.txt; summarize it now. A launch without a session
         // leaves the last summary in place (LogSummary.write).
+        // A session still marked active (sessionBegan) ended with Madeira on screen and no
+        // return to the library: the library offers its summary with Share logs.
+        let unfinished = UserDefaults.standard.string(forKey: Self.sessionKey)
+        UserDefaults.standard.removeObject(forKey: Self.sessionKey)
         if FileManager.default.fileExists(atPath: prevLogURL.path) {
-            LogSummary.writeLater(from: prevLogURL, source: "madeira-log.prev.txt (the previous run)")
+            if let unfinished {
+                let summaryURL = docs.appendingPathComponent(LogSummary.fileName)
+                DispatchQueue.global(qos: .utility).async {
+                    let wrote = LogSummary.write(from: prevLogURL, source: "madeira-log.prev.txt (the previous run)")
+                    let summary = wrote ? ((try? String(contentsOf: summaryURL, encoding: .utf8)) ?? "") : ""
+                    DispatchQueue.main.async {
+                        LastSessionReport.shared.report = LastSessionReport.Report(game: unfinished, summary: summary)
+                    }
+                }
+            } else {
+                LogSummary.writeLater(from: prevLogURL, source: "madeira-log.prev.txt (the previous run)")
+            }
+        }
+        // iOS may end a session in the background (a swipe, memory for other apps) without
+        // that being a crash, so the mark stands only while Madeira is on screen.
+        NotificationCenter.default.addObserver(forName: UIApplication.didEnterBackgroundNotification,
+                                               object: nil, queue: .main) { _ in
+            UserDefaults.standard.removeObject(forKey: LogStore.sessionKey)
+        }
+        NotificationCenter.default.addObserver(forName: UIApplication.willEnterForegroundNotification,
+                                               object: nil, queue: .main) { [weak self] _ in
+            if let game = self?.sessionGame { UserDefaults.standard.set(game, forKey: LogStore.sessionKey) }
         }
         // Madeira swiped away from the app switcher ends without returning to the
         // library: summarize the session so far whenever Madeira goes to the background.
@@ -160,6 +197,19 @@ final class LogStore: ObservableObject {
 
     /// Documents/madeira-log.txt, this run's log.
     var logURL: URL { logFileURL }
+
+    /// Set from LibraryModel.begin until finish or a deliberate close (prepareForExit): still
+    /// set at the next launch, the session ended without returning to the library.
+    private static let sessionKey = "madeira.sessionActive"
+    private var sessionGame: String?
+    func sessionBegan(game: String) {
+        sessionGame = game
+        UserDefaults.standard.set(game, forKey: Self.sessionKey)
+    }
+    func sessionEnded() {
+        sessionGame = nil
+        UserDefaults.standard.removeObject(forKey: Self.sessionKey)
+    }
 
     /// Keeps this session's log under the program's name as well:
     /// Documents/logs/<exe>-<yyyy-MM-dd_HH-mm-ss>.txt, e.g.

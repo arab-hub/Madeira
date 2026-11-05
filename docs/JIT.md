@@ -264,6 +264,25 @@ Its steps, to make it by hand (name it exactly **Madeira JIT**):
 Then turn on **Settings → JIT → Madeira JIT shortcut**. Without the shortcut,
 leave it off: Shortcuts would only report that the shortcut is missing.
 
+## LiveContainer
+
+Madeira knows it is running inside LiveContainer when `LC_HOME_PATH` is set
+(`LiveContainerEnv`, `app/Madeira/JITBuiltInHost.swift`). There:
+
+- **Built-in StikJIT is unavailable.** First-run setup hides both in-app choices,
+  **Settings → JIT** does not offer the method unless it was already chosen,
+  and **Automatic** resolves to StikDebug, even when StikDebug is not detected
+  (the error then says to install it). See [StikDebug](#stikdebug).
+- **The Memory+ badge describes LiveContainer.** It reads the entitlements of the
+  running process, which is LiveContainer's, so the Increased Memory Limit
+  capability has to be on the copy of LiveContainer you signed; signing Madeira's
+  IPA does not change the badge. Game details warns under **Play** when JIT or
+  Memory+ is missing, inside LiveContainer and out.
+- **`drive_c` is not under a "Madeira" folder in the Files app.** It is in the
+  guest's data inside LiveContainer's Documents folder. The empty library says
+  where, read from the running app's own paths, and **+ → Import folder** or
+  **Import .zip/.7z** bring a game in without finding it.
+
 ## Signing and installation
 
 The app and `MadeiraJITHelper` extension must be signed together. Sideloaders
