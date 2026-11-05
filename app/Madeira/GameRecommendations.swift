@@ -838,6 +838,30 @@ enum GameRecommendations {
         env.MADEIRA_CONTROLS_XBOX_DEFAULT = 1
         env.MADEIRA_EC_HOOK_TRACE = 0
         """)
+    /// Cyberpunk 2077 (Steam App ID 1091500). With only the standard line, an
+    /// iPhone19,2 (iOS 27.2, 2026-11-05) got a 464 MB JIT pool: a small malloc region
+    /// above the executable window blocked the early placeholder, and the game's x64
+    /// images were copied into the pool until libxess_fg.dll and libxess.dll (up to
+    /// 74 MB each) failed with c0000017 and the game exited with c0000135. pool-split
+    /// joins the runs past that region and MADEIRA_X64_IMAGE_NOCOPY runs the x64
+    /// images in place, as for Dark Souls III. The memory lines are RDR2's swap tier,
+    /// another large D3D12 world. Not yet shown to reach the menu on a device.
+    static let cyberpunk2077 = GameRecommendation(
+        id: "cyberpunk-2077", title: "Cyberpunk 2077", version: 1,
+        config: """
+        # Madeira's recommended settings for Cyberpunk 2077.
+        # Reset to Recommended, at the bottom of the game's settings, brings them back.
+        pool-split = 1
+        env.MADEIRA_X64_IMAGE_NOCOPY = 1
+        env.MADEIRA_POOL_HEAD_RESERVE_MB = 128
+        swap-mb = 8192
+        swap-mode = 2
+        env.MADEIRA_SWAP_MIN_KB = 64
+        swap-images = 1
+        vram-mb = 2304
+        env.MADEIRA_LOCK_ORPHAN = stamped
+        env.MADEIRA_EC_HOOK_TRACE = 0
+        """)
     /// Fallout: New Vegas (tested on an iPhone, 2026-10-26): loading a save crashed at
     /// 00B57AA9 right after the game built a face, on Madeira's own card name and
     /// driver, which give it the basic render path (Shader Package 2). "Older NVIDIA
@@ -1246,7 +1270,8 @@ enum GameRecommendations {
     static let all = [rdr2Steam, rdr2Other, gta5EnhancedSteam, gta5EnhancedOther, gta5LegacySteam, gta5LegacyOther, gta4Steam,
                       ghostOfTsushima, godOfWar, horizonZeroDawn, horizonForbiddenWest, ratchetClankRiftApart, crysisRemastered,
                       crysis2Remastered, crysis3Remastered, rockstarLauncher, rockstarLauncherSetup, steamBigPicture,
-                      darkSoulsRemastered, darkSoulsIII, falloutNewVegas, fallout3, blackOps1, blackOps2, borderlands2, standard]
+                      darkSoulsRemastered, darkSoulsIII, cyberpunk2077, falloutNewVegas, fallout3, blackOps1, blackOps2, borderlands2,
+                      standard]
         + steamTitles.map(\.list)
 
     // MARK: Recognising a game
@@ -1260,6 +1285,7 @@ enum GameRecommendations {
     /// Black Ops II's campaign, Zombies and multiplayer.
     static let blackOps2AppIDs: Set<Int> = [202970, 212910, 202990]
     static let borderlands2AppID = 49520
+    static let cyberpunk2077AppID = 1091500
     /// The first Black Ops (its untested multiplayer, 42710, shares the folder).
     static let blackOps1AppID = 42700
     /// GTA V Legacy, the edition every Steam copy of GTA V also carries.
@@ -1292,6 +1318,7 @@ enum GameRecommendations {
             if steamAppID == horizonZeroDawnAppID || installFolder == "horizon zero dawn" { return horizonZeroDawn }
             if steamAppID == darkSoulsRemasteredAppID || installFolder == "dark souls remastered" { return darkSoulsRemastered }
             if steamAppID == darkSoulsIIIAppID || installFolder == "dark souls iii" { return darkSoulsIII }
+            if steamAppID == cyberpunk2077AppID || installFolder == "cyberpunk 2077" { return cyberpunk2077 }
             if steamAppID == falloutNewVegasAppID || installFolder == "fallout new vegas" { return falloutNewVegas }
             if steamAppID.map(fallout3AppIDs.contains) == true || installFolder == "fallout 3"
                 || installFolder == "fallout 3 goty" { return fallout3 }
@@ -1343,6 +1370,11 @@ enum GameRecommendations {
             return darkSoulsRemastered
         case "darksoulsiii.exe":
             return darkSoulsIII
+        case "cyberpunk2077.exe":
+            return cyberpunk2077
+        case "redprelauncher.exe" where inSteam || parts.contains("cyberpunk 2077"):
+            // CD Projekt's launcher stub, which starts Cyberpunk2077.exe in the same session.
+            return cyberpunk2077
         case "falloutnv.exe":
             return falloutNewVegas
         case "fallout3.exe":

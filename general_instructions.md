@@ -9,6 +9,7 @@ How to read: read CORE, then only the Index categories the task touches. Grep `^
 | Build | CI branches, cache keys, Official build versus CI |
 | Safety | Shared setups, deleting game files |
 | Performance | Default changes and their switches |
+| Games | Per-game configs, JIT pool size |
 
 # CORE
 
@@ -57,3 +58,13 @@ The official v0.2.0 IPA was built on the developer's machine, with `patches/wine
 Commit dd39f3b removed lean plus `FASTSYNC_SEM` from the GTA V lists after loading stalled on an 8 GB phone. Test GTA V if lean stays the default.
 
 Direct requests and the lower-memory D3D12 options stay off, under Settings › Performance experiments.
+
+# Games
+
+## Per-game configs
+
+A game's own config is `Library/Application Support/GameConfigs/<FNV-1a 64 of the lowercased Windows path>.cfg` inside Madeira's container (`LibraryPrefs.stableHash`). For a library Steam game the path is its `steamapps\common\<folder>`. Built-in lists live in `GameRecommendations.swift`; `tests/host/check-game-recommendations.py` pins the `all` line, the list count and the ids.
+
+## JIT pool size
+
+A single pool region cannot pass about 880 MB: it must sit below `0x180000000`, above the 128 MB executable window. `pool = 1152` without `pool-split = 1` always shrinks. When anything is mapped just above the window at image load, the early placeholder fails and the pool drops below 500 MB. Big 64-bit games then need `pool-split = 1` and `env.MADEIRA_X64_IMAGE_NOCOPY = 1` (Cyberpunk 2077, 2026-11-05: 464 MB pool, libxess failed with c0000017).

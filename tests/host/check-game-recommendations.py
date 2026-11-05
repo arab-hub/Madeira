@@ -78,13 +78,14 @@ MERGED = {'msfs-2024', 'counter-strike-2', 'breakneck', 'spelunky-2', 'albion-on
 assert set(presets) == {'rdr2-steam', 'rdr2-other', 'gta5e-steam', 'gta5e-other', 'gta5l-steam', 'gta5l-other', 'gta4-steam',
                         'ghost-of-tsushima', 'god-of-war', 'horizon-zero-dawn', 'horizon-forbidden-west', 'ratchet-clank-rift-apart',
                         'crysis-remastered', 'crysis-2-remastered', 'crysis-3-remastered', 'rockstar-launcher', 'rockstar-launcher-setup',
-                        'steam-big-picture', 'dark-souls-remastered', 'dark-souls-iii', 'fallout-new-vegas', 'fallout-3', 'black-ops-1', 'black-ops-2', 'borderlands-2',
+                        'steam-big-picture', 'dark-souls-remastered', 'dark-souls-iii', 'cyberpunk-2077', 'fallout-new-vegas', 'fallout-3', 'black-ops-1', 'black-ops-2', 'borderlands-2',
                         'standard'} | MERGED, \
     sorted(presets)
 assert ('static let all = [rdr2Steam, rdr2Other, gta5EnhancedSteam, gta5EnhancedOther, gta5LegacySteam, gta5LegacyOther, gta4Steam,\n'
         '                      ghostOfTsushima, godOfWar, horizonZeroDawn, horizonForbiddenWest, ratchetClankRiftApart, crysisRemastered,\n'
         '                      crysis2Remastered, crysis3Remastered, rockstarLauncher, rockstarLauncherSetup, steamBigPicture,\n'
-        '                      darkSoulsRemastered, darkSoulsIII, falloutNewVegas, fallout3, blackOps1, blackOps2, borderlands2, standard]\n'
+        '                      darkSoulsRemastered, darkSoulsIII, cyberpunk2077, falloutNewVegas, fallout3, blackOps1, blackOps2, borderlands2,\n'
+        '                      standard]\n'
         '        + steamTitles.map(\\.list)') in lists_src
 # The Rockstar Games Launcher outside Steam (logs 91-93, 2026-10-28): Launcher.exe in its own folder gets the
 # launcher chain's lines, its installer the standard line; both start in the Wine desktop with Windows services.
@@ -163,7 +164,7 @@ FORK_DEFAULTS = ["# The defaults this list was tested with (upstream's differ)."
                  'env.MADEIRA_FREE_DELAY_MS = 2000', 'env.MADEIRA_CTX_CPU_AREA = 2', 'env.MADEIRA_WAIT_CHILDREN = 1',
                  'env.MADEIRA_JIT_DUMP = 0']
 for ident, p in presets.items():
-    if ident in ('dark-souls-remastered', 'dark-souls-iii'):
+    if ident in ('dark-souls-remastered', 'dark-souls-iii', 'cyberpunk-2077'):
         p['tested'], p['fork'] = [line for line in p['lines'][2:] if not line.startswith('#')], []
         continue
     # The Fallout lists are the standard one plus a switch: the games ran with it.
@@ -202,7 +203,7 @@ for ident, p in presets.items():
         assert 'socialclub' not in named and 'MADEIRA_DLL_LOCAL' not in line, (ident, line)
 for ident in ('fallout-new-vegas', 'fallout-3'):
     assert presets[ident]['tested'] == presets['standard']['tested'] and presets[ident]['switches'] == 'olderNvidia: true', presets[ident]
-print('PASS: seventy-seven lists (twenty-six plus 51 merged Steam titles), two comment lines each, every game list but Dark Souls ends with the four fork defaults and the standard, Fallout and Black Ops II ones have none, no key twice, '
+print('PASS: seventy-eight lists (twenty-seven plus 51 merged Steam titles), two comment lines each, every game list but Dark Souls and Cyberpunk ends with the four fork defaults and the standard, Fallout and Black Ops II ones have none, no key twice, '
       'every non-env key in the settings catalog, no Social Club DLL lines, no variant DLL switches')
 
 # Red Dead Redemption 2 from Steam: the owner's list of 2026-10-09 (build 463), line for line,
@@ -802,7 +803,12 @@ check(id(steam + #"\The Escapists 2"#, 641990) == "the-escapists-2" && id(steam 
       "The Escapists 2 by App ID, folder and program")
 check(id(steam + #"\GarrysMod"#, 4000) == "garrys-mod" && id(steam + #"\GarrysMod\bin\win64\gmod.exe"#) == "garrys-mod"
       && id(steam + #"\GarrysMod\hl2.exe"#) == "garrys-mod", "Garry's Mod by App ID, folder and program, both branches")
-check(R.steamTitles.count == 51 && R.all.count == 77, "51 merged titles, 77 lists")
+check(R.steamTitles.count == 51 && R.all.count == 78, "51 merged titles, 78 lists")
+check(id(steam + #"\Cyberpunk 2077"#, 1091500) == "cyberpunk-2077" && id(steam + #"\Cyberpunk 2077"#) == "cyberpunk-2077"
+      && id(steam + #"\Cyberpunk 2077\bin\x64\Cyberpunk2077.exe"#) == "cyberpunk-2077"
+      && id(steam + #"\Cyberpunk 2077\REDprelauncher.exe"#) == "cyberpunk-2077",
+      "Cyberpunk 2077 by App ID, folder, game program and launcher stub")
+check(id(#"C:\Games\Other\REDprelauncher.exe"#) == "none", "another game's REDprelauncher.exe outside Steam gets nothing")
 check(id(#"C:\Games\Foo\foo.exe"#) == "none" && id(steam + #"\Portal 2"#, 620) == "none", "other games")
 check(id("") == "none" && id("C:\\") == "none", "no path")
 print("PASS: Steam games by App ID or steamapps\\common folder, GTA V Enhanced and RDR2 inside and outside Steam, GoT, GoW, the Horizon games, Rift Apart and the three Crysis Remastered games by their programs, GTA V Legacy outside Steam, the 51 merged Steam titles, others none")
