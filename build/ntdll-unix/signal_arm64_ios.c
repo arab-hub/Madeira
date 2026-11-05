@@ -2084,6 +2084,20 @@ void ios_reclaim_note_page( unsigned long long pg )
     ios_rr_pages[slot % IOS_RRPAGE_MAX] = pg;
 }
 
+/* ml1298b: the emulator's host arena as ios_reserve_fex_arena published it
+ * (virtual_ios.c), else the hardware band it takes by default. The recovery
+ * paths below repair EMULATOR pages in it (restore R|X, or a fresh zero page for
+ * a reclaimed code-cache page); with arena-mb moving the arena, the hardware
+ * band holds guest memory instead, where the same repair would hide a real
+ * access violation or zero live data. */
+extern ULONG_PTR ios_fex_arena_base_unix, ios_fex_arena_end_unix;
+static inline int ios_in_fex_arena( unsigned long long a )
+{
+    if (ios_fex_arena_end_unix > ios_fex_arena_base_unix)
+        return a >= ios_fex_arena_base_unix && a < ios_fex_arena_end_unix;
+    return a >= 0x7C00000000ULL && a < 0x8000000000ULL;
+}
+
 void ios_reclaim_pages_report( const char *when, unsigned long long fault_addr );
 void ios_reclaim_pages_report( const char *when, unsigned long long fault_addr )
 {
@@ -6554,7 +6568,7 @@ wx_done: ;
                     uint64_t rx = (uint64_t)(uintptr_t)ios_jit_rx_base_global;
                     int in_pool_rx = (rx && fa >= rx && fa < rx + ios_jit_pool_size_global) ||
                                      ios_jit_low_contains( (uintptr_t)fa );   /* madeira-bcd pool-low */
-                    int in_band    = (fa >= 0x7C00000000ULL && fa < 0x8000000000ULL);
+                    int in_band    = ios_in_fex_arena( fa );   /* ml1298b */
 
                     if (in_pool_rx || in_band)
                     {
@@ -6668,8 +6682,7 @@ wx_done: ;
                          ios_jit_low_rw_contains( (uintptr_t)fa )))   /* madeira-bcd pool-low */
                         goto skip_reclaim_band;
                 }
-                if (!handled && fa != (uint64_t)fault_pc &&
-                    fa >= 0x7C00000000ULL && fa < 0x8000000000ULL)
+                if (!handled && fa != (uint64_t)fault_pc && ios_in_fex_arena( fa ))   /* ml1298b */
                 {
                     static volatile uint64_t rr_pg[16] = {0};
                     static volatile uint32_t rr_n[16]  = {0};

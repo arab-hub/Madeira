@@ -32532,6 +32532,51 @@ static struct { uintptr_t base; SIZE_T real, size; } ios_oversize[IOS_OVERSIZE_S
 static unsigned ios_oversize_n;
 static pthread_mutex_t ios_oversize_lock = PTHREAD_MUTEX_INITIALIZER;
 
+/* ml1298b: where the real part goes. By default it takes the lowest hole that
+ * fits, and the unmapped rest of the reserve then covers whatever else the map
+ * holds above it -- Wine's DLLs, thread stacks, the emulator's arena, other
+ * pools. A program that commits deep into its reserve (Cyberpunk 2077 2.5 asked
+ * for 64 GB and committed past a 2 GB and a 6 GB real part, 2026-11-05) then
+ * either fails on a foreign image or, where the address is free inside
+ * someone else's reservation, commits into it. Against the top of the map the
+ * rest of the reserve lies past the task ceiling, where nothing can be mapped:
+ * every commit past the real part fails, and only the owner's commits are
+ * logged by ios_oversize_commit_failed. */
+static int ios_oversize_top( void )
+{
+    static int top = -1;
+    if (top < 0)
+        top = madeira_cfg_bool( "oversize-reserve-top", 0 );   /* ml1298b: put the real part against the top of the address space, so the unmapped rest lies past the task ceiling */
+    return top;
+}
+
+/* ml1298b: the real part as high as it fits, in 16 MB steps down from the map's
+ * end. The map ends at 0x8000000000 here (ml990); the last few MB below it are
+ * usually taken, so the first candidates fail and cost one view lookup each. */
+static NTSTATUS ios_oversize_place_top( void **base, SIZE_T *sz, ULONG type, ULONG protect )
+{
+    const ULONG_PTR ceiling = 0x8000000000ULL, step = 0x1000000;
+    ULONG_PTR cand;
+    unsigned tries;
+
+    if (*sz >= ceiling - 0x7000000000ULL) return STATUS_NO_MEMORY;
+    for (cand = (ceiling - *sz) & ~(ULONG_PTR)0xffff, tries = 0;
+         cand >= 0x7000000000ULL && tries < 2048; cand -= step, tries++)
+    {
+        void *b = (void *)cand;
+        SIZE_T s = *sz;
+        if (!allocate_virtual_memory( &b, &s, type & ~MEM_TOP_DOWN, protect, 0, 0, 0, 0 ))
+        {
+            dprintf( 2, "[oversize] ml1298b real part at the top: %p+%llu MB, %llu MB below the map's end "
+                     "(%u candidate(s))\n", b, (unsigned long long)(s >> 20),
+                     (unsigned long long)((ceiling - ((ULONG_PTR)b + s)) >> 20), tries + 1 );
+            *base = b; *sz = s;
+            return STATUS_SUCCESS;
+        }
+    }
+    return STATUS_NO_MEMORY;
+}
+
 static NTSTATUS ios_oversize_reserve( void **ret, SIZE_T *size_ptr, ULONG type, ULONG protect )
 {
     long long cap_mb = ios_oversize_real_mb();
@@ -32556,7 +32601,11 @@ static NTSTATUS ios_oversize_reserve( void **ret, SIZE_T *size_ptr, ULONG type, 
         SIZE_T sz = real, full = ROUND_SIZE( 0, want, page_mask );
         unsigned slot;
 
-        if (allocate_virtual_memory( &base, &sz, type, protect, 0, 0, IOS_OVERSIZE_ALIGN, 0 )) continue;
+        if (ios_oversize_top() && !ios_fft_arena_size)
+        {
+            if (ios_oversize_place_top( &base, &sz, type, protect )) continue;
+        }
+        else if (allocate_virtual_memory( &base, &sz, type, protect, 0, 0, IOS_OVERSIZE_ALIGN, 0 )) continue;
         pthread_mutex_lock( &ios_oversize_lock );
         slot = ios_oversize_n++ % IOS_OVERSIZE_SLOTS;
         ios_oversize[slot].base = (uintptr_t)base;
@@ -32579,15 +32628,21 @@ static NTSTATUS ios_oversize_reserve( void **ret, SIZE_T *size_ptr, ULONG type, 
 /* ml1298: a failed commit past the real part of an oversized reserve. */
 static void ios_oversize_commit_failed( const void *addr, SIZE_T size, NTSTATUS status )
 {
+    /* ml1298b: the first 8, then each new depth at least 64 MB past the deepest so
+     * far (up to 64 lines): with the real part at the top these are only the
+     * owner's commits, and the deepest one is the real part it needs. */
     static unsigned logged;
+    static uintptr_t deepest;
     uintptr_t a = (uintptr_t)addr;
     unsigned i;
 
-    if (!ios_oversize_n || logged >= 16) return;
+    if (!ios_oversize_n || logged >= 64) return;
     for (i = 0; i < IOS_OVERSIZE_SLOTS; i++)
     {
         uintptr_t b = ios_oversize[i].base;
         if (!b || a < b + ios_oversize[i].real || a >= b + ios_oversize[i].size) continue;
+        if (logged >= 8 && a - b < deepest + (64u << 20)) return;
+        if (a - b > deepest) deepest = a - b;
         logged++;
         dprintf( 2, "[oversize] ml1298 commit %p+0x%llx failed (0x%x): %llu MB into the reserve at 0x%llx, "
                  "past its real %llu MB\n", addr, (unsigned long long)size, (unsigned)status,
