@@ -18460,6 +18460,28 @@ static int mad_blend_factor_no_src1(enum WMTBlendFactor *f) {
     default: return 0;
     }
 }
+/* Metal also refuses dual-source blending whenever the pipeline has more than
+ * one colour attachment ("Dual source blending is used in combination with
+ * multiple render targets"), even with the Source1 factors on RT0 only. D3D12
+ * leaves that undefined too; Cyberpunk 2077 2.5 builds one with three render
+ * targets while a save loads (2026-11-06). Such a pipeline is compiled and
+ * blended as an ordinary multiple-render-target one: the pixel stage is not
+ * converted for dual-source output, and every Source1 factor, RT0's included,
+ * becomes its first-source equivalent. */
+static int mad_blend_desc_uses_src1(const D3D12_RENDER_TARGET_BLEND_DESC *b) {
+    UINT f[4] = { b->SrcBlend, b->DestBlend, b->SrcBlendAlpha, b->DestBlendAlpha }, k;
+    for (k = 0; k < 4; k++)
+        if (f[k] == D3D12_BLEND_SRC1_COLOR || f[k] == D3D12_BLEND_INV_SRC1_COLOR ||
+            f[k] == D3D12_BLEND_SRC1_ALPHA || f[k] == D3D12_BLEND_INV_SRC1_ALPHA)
+            return 1;
+    return 0;
+}
+static int mad_dual_source_mrt(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *desc) {
+    UINT k, n = 0;
+    for (k = 0; k < desc->NumRenderTargets && k < 8; k++)
+        if (desc->RTVFormats[k] != DXGI_FORMAT_UNKNOWN) n++;
+    return n > 1 && mad_blend_desc_uses_src1(&desc->BlendState.RenderTarget[0]);
+}
 static enum WMTBlendOperation mad_blend_op(D3D12_BLEND_OP o) {
     switch (o) {
     case D3D12_BLEND_OP_SUBTRACT: return WMTBlendOperationSubtract;
@@ -19144,11 +19166,8 @@ static HRESULT device_CreateGraphicsPipelineState_impl(ID3D12Device *This,
                 UINT k, flags = 0, unorm = 0;
                 const D3D12_RENDER_TARGET_BLEND_DESC *b0 = &desc->BlendState.RenderTarget[0];
                 /* Dual-source blending is in use when any factor names SRC1. */
-                UINT f[4] = { b0->SrcBlend, b0->DestBlend, b0->SrcBlendAlpha, b0->DestBlendAlpha };
-                for (k = 0; k < 4; k++)
-                    if (f[k] == D3D12_BLEND_SRC1_COLOR || f[k] == D3D12_BLEND_INV_SRC1_COLOR ||
-                        f[k] == D3D12_BLEND_SRC1_ALPHA || f[k] == D3D12_BLEND_INV_SRC1_ALPHA)
-                        flags |= MADEIRA_IR_PS_DUAL_SOURCE_BLEND;
+                if (mad_blend_desc_uses_src1(b0) && !mad_dual_source_mrt(desc))   /* see mad_dual_source_mrt */
+                    flags |= MADEIRA_IR_PS_DUAL_SOURCE_BLEND;
                 if (desc->DSVFormat == DXGI_FORMAT_UNKNOWN) flags |= MADEIRA_IR_PS_DISABLE_DEPTH;
                 for (k = 0; k < desc->NumRenderTargets && k < 8; k++)
                     if (mad_format_is_unorm(desc->RTVFormats[k])) unorm |= 1u << k;
@@ -19342,7 +19361,7 @@ static HRESULT device_CreateGraphicsPipelineState_impl(ID3D12Device *This,
         rp.colors[i].dst_rgb_blend_factor = mad_blend_factor(b->DestBlend);
         rp.colors[i].src_alpha_blend_factor = mad_blend_factor(b->SrcBlendAlpha);
         rp.colors[i].dst_alpha_blend_factor = mad_blend_factor(b->DestBlendAlpha);
-        if (i > 0) {   /* see mad_blend_factor_no_src1 */
+        if (i > 0 || mad_dual_source_mrt(desc)) {   /* see mad_blend_factor_no_src1, mad_dual_source_mrt */
             int n = mad_blend_factor_no_src1(&rp.colors[i].src_rgb_blend_factor)
                   + mad_blend_factor_no_src1(&rp.colors[i].dst_rgb_blend_factor)
                   + mad_blend_factor_no_src1(&rp.colors[i].src_alpha_blend_factor)
