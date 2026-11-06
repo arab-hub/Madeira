@@ -13,7 +13,7 @@ How to read: read CORE, then only the Index categories the task touches. Grep `^
 
 # CORE
 
-- This is `arabdogwater/Madeira`, a fork of `willfaust/Madeira`. Windows has no Swift or Apple compiler, so GitHub Actions is the only compile.
+- Builds run in `arab-hub/Madeira` (org fork of `willfaust/Madeira`, git remote `org`). GitHub disabled Actions on `arabdogwater/Madeira` on 2026-11-06; push there only to keep it in sync. Windows has no Swift or Apple compiler, so GitHub Actions is the only compile.
 - Push work to `codex/pr-build-*` first. A push to `main` cancels a running `main` build.
 - `tests/host/*.py` assert exact source text. Grep them before changing a line or default, and sign off commits (`git commit -s`).
 - Nothing below has run on a device unless it says so.
@@ -24,7 +24,7 @@ END CORE
 
 ## CI branches
 
-`.github/workflows/build.yml` runs on `main` and `codex/pr-build-*`, and uploads `Madeira-ipa`. A run reuses finished components from `main`'s cache.
+`.github/workflows/build.yml` runs on `main` and `codex/pr-build-*`, and uploads `Madeira-ipa`. A run reuses finished components from `main`'s cache; a new repository starts cold (about an hour). Jobs use GitHub's `xcode-27` image: the ntdll unix side needs the iOS 27 SDK. Depot's macOS runners stop at Xcode 26.6 (and need an organization repository with public repositories allowed in the runner group), and Depot CI has no macOS, so neither can build the app job.
 
 ## Cache keys
 
