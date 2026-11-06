@@ -838,33 +838,60 @@ enum GameRecommendations {
         env.MADEIRA_CONTROLS_XBOX_DEFAULT = 1
         env.MADEIRA_EC_HOOK_TRACE = 0
         """)
-    /// Cyberpunk 2077 (Steam App ID 1091500). With only the standard line, an
-    /// iPhone19,2 (iOS 27.2, 2026-11-05) got a 464 MB JIT pool: a small malloc region
-    /// above the executable window blocked the early placeholder, and the game's x64
-    /// images were copied into the pool until libxess_fg.dll and libxess.dll (up to
-    /// 74 MB each) failed with c0000017 and the game exited with c0000135. pool-split
-    /// joins the runs past that region (880 MB on the next launch). Not
-    /// MADEIRA_X64_IMAGE_NOCOPY: with it REDprelauncher.exe read a null object's
-    /// field (AV at 4) in PocoFoundation.dll+0x27cfe during start-up, before the
-    /// game was started, so no swap-images either (it needs NOCOPY). Next the game
-    /// reserved 16 GB, then asked for 64 GB unhinted ("[oversize] ml1298 ... does not
-    /// fit the map and fails"), then 32 GB, and read address 0x28 a second after
-    /// start; oversize-reserve serves the 64 GB request with a real 16 GB part, as
-    /// for Final Fantasy Tactics. The memory lines are RDR2's swap tier, another
-    /// large D3D12 world. Not yet shown to reach the menu on a device.
+    /// Cyberpunk 2077 (Steam App ID 1091500), patch 2.5, on an iPhone19,2 (iOS 27.2,
+    /// 2026-11-05/06). It reserves about 103 GB of address space against the ~55 GB an
+    /// iOS app can map: 16 GB, 64 GB, 32 GB (falls back to 2 x 1 GB), five 4 GB pools
+    /// that commit 1-24 MB each, and a sixth about three minutes into play.
+    ///  - JIT pool: pool-split joins the runs past the main thread's stack; pool-low
+    ///    and its image switches give FEX's code buffers region C, so the pool holds
+    ///    the DLL copies (12 exhaustions before, none after; the FSR DLLs load). Not
+    ///    MADEIRA_X64_IMAGE_NOCOPY: REDprelauncher.exe crashed in PocoFoundation.dll.
+    ///  - Address space: the 64 GB reserve gets a 4 GB real part against the map's top
+    ///    (ml1298b; the game used 2.25 GB of it in two runs), failed pools of 4 GB and
+    ///    more get 1 GB real parts (ml1298c), and the emulator arena is 4 GB (FEX
+    ///    peaked at 2.66 GB) with the grow fallback on.
+    ///  - Memory: the game budgets from reported RAM; at 6 GB its load ran out of
+    ///    budget, at 12 GB it ran. The swap tier backs its pools (16 GB reserve-max)
+    ///    and keeps the footprint near 5.5 GB of the 6.1 GB limit. totalphys = 12288
+    ///    assumes a 12 GB device.
+    ///  - GPU: fence-chain = 6 cut GPU time per frame from 52-60 ms to 24-28 ms;
+    ///    rp-carry, rp-discard and f6-rar trim the 880 MB of attachment traffic and
+    ///    barrier syncs a frame; RDR2's ring-share, indirect-fast and shader packs.
+    ///  - CPU: the x64 critical-section and TLS fast paths, as Dark Souls III.
     static let cyberpunk2077 = GameRecommendation(
-        id: "cyberpunk-2077", title: "Cyberpunk 2077", version: 1,
+        id: "cyberpunk-2077", title: "Cyberpunk 2077", version: 2,
         config: """
         # Madeira's recommended settings for Cyberpunk 2077.
         # Reset to Recommended, at the bottom of the game's settings, brings them back.
         pool-split = 1
+        pool-low = 1
+        pool-page-fit = 1
+        env.MADEIRA_POOL_LOW_IMAGES = 1
+        env.MADEIRA_POOL_RECYCLE_IMAGES = 1
         oversize-reserve = 1
+        oversize-reserve-top = 1
+        oversize-reserve-mb = 4096
+        oversize-reserve-min-mb = 4096
+        oversize-pool-real-mb = 1024
+        arena-mb = 4096
+        env.MADEIRA_FEX_ARENA_GROW = 1
+        totalphys = 12288
         env.MADEIRA_POOL_HEAD_RESERVE_MB = 128
-        swap-mb = 8192
+        swap-mb = 16384
         swap-mode = 2
+        env.MADEIRA_SWAP_RESERVE_MAX_MB = 16384
         env.MADEIRA_SWAP_MIN_KB = 64
-        vram-mb = 2304
+        vram-mb = 1536
+        fence-chain = 6
+        f6-rar = 1
+        rp-carry = 1
+        rp-discard = 1
+        ring-share = 1
+        indirect-fast = 1
+        d3d12-shader-pack = 1
         env.MADEIRA_LOCK_ORPHAN = stamped
+        env.MADEIRA_CS_X64 = 1
+        env.MADEIRA_TLS_X64 = 1
         env.MADEIRA_EC_HOOK_TRACE = 0
         """)
     /// Fallout: New Vegas (tested on an iPhone, 2026-10-26): loading a save crashed at
