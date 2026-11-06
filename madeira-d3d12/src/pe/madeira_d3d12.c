@@ -1062,6 +1062,7 @@ static void mad_pso_time_report(const char *why) {
               why, g_pn_gfx, (double)g_pt_gfx * ms, g_pn_cs, (double)g_pt_cs * ms, (double)g_pt_conv * ms, g_pn_lib,
               (double)g_pt_lib * ms, g_pn_rs, (double)g_pt_rs * ms, g_pn_realize, (double)g_pt_realize * ms);
 }
+static LONG g_res_make, g_res_evict, g_res_make_objs, g_res_evict_objs;   /* device_MakeResident / device_Evict, [perf] residency */
 static LONG g_perf_ecl, g_perf_signals, g_perf_waits, g_perf_polls, g_perf_qwait_sleeps; static LONGLONG g_perf_wait_ticks, g_perf_sig_lat_ticks; static LONG g_perf_sig_lat_n;
 #define MAD_SKIP(e_) (mad_skip_at(__LINE__), (e_)->skipped++)
 static void mad_pso_time_report(const char *why);
@@ -10965,6 +10966,12 @@ static void mad_perf_present(void) {
                   g_perf_presents ? (double)g_perf_polls / g_perf_presents : 0.0, g_perf_presents ? (double)g_perf_qwait_sleeps / g_perf_presents : 0.0,
                   g_perf_sig_lat_n ? 1000.0 * g_perf_sig_lat_ticks / (double)fq.QuadPart / g_perf_sig_lat_n : 0.0, g_perf_sig_lat_n);
         if (g_fc_on > 0 && g_perf_presents) mad_fc_report((double)g_perf_presents, (double)fq.QuadPart);   /* fence-census */
+        if (g_perf_presents && (g_res_make || g_res_evict)) {   /* the game's residency calls (device_MakeResident) */
+            double nf = (double)g_perf_presents;
+            d3d12_log("[perf] residency per frame: MakeResident %.1f calls (%.1f objects), Evict %.1f calls (%.1f objects)\n",
+                      InterlockedExchange(&g_res_make, 0) / nf, InterlockedExchange(&g_res_make_objs, 0) / nf,
+                      InterlockedExchange(&g_res_evict, 0) / nf, InterlockedExchange(&g_res_evict_objs, 0) / nf);
+        }
         if (g_fcommit_on > 0 && g_perf_presents)   /* fence-commit-ids */
             d3d12_log("[perf] fence-commit per frame: %.1f fence values completed at their commit\n",
                       (double)InterlockedExchange(&g_fcommit_early, 0) / g_perf_presents);
@@ -21109,6 +21116,26 @@ static HRESULT STDMETHODCALLTYPE device_SetResidencyPriority(ID3D12Device10 *Thi
     (void)This; (void)n; (void)objs; (void)prio;
     return S_OK;                     /* unified memory: everything is resident */
 }
+/* MakeResident and Evict were the stubs' E_NOTIMPL. Cyberpunk 2077 runs Microsoft's
+ * D3D12 residency library: over its budget (QueryVideoMemoryInfo, trimmed to ~0.8-1 GB
+ * as the footprint nears the kill line, against ~1.8 GB allocated) it evicts its least
+ * recently used objects, and first waits for the GPU to finish the newest work that
+ * used them ([perf] fence-census: "residencyFence", ~10 waits a frame, 100% for the
+ * newest Signal, ~20 ms of a ~45 ms frame). The eviction never succeeded, so it tried
+ * again on every submission. On unified memory everything stays resident: both report
+ * success, which is what they would do on a GPU with room. The waits themselves go away
+ * only when the budget covers what is allocated (vram-mb / vram-trim-mb). Counted in
+ * [perf] residency. */
+static HRESULT STDMETHODCALLTYPE device_MakeResident(ID3D12Device10 *This, UINT n, ID3D12Pageable *const *objs) {
+    (void)This; (void)objs;
+    InterlockedIncrement(&g_res_make); InterlockedExchangeAdd(&g_res_make_objs, (LONG)n);
+    return S_OK;                     /* unified memory: everything is resident */
+}
+static HRESULT STDMETHODCALLTYPE device_Evict(ID3D12Device10 *This, UINT n, ID3D12Pageable *const *objs) {
+    (void)This; (void)objs;
+    InterlockedIncrement(&g_res_evict); InterlockedExchangeAdd(&g_res_evict_objs, (LONG)n);
+    return S_OK;                     /* Metal keeps the memory; nothing to page out */
+}
 static HRESULT STDMETHODCALLTYPE device_EnqueueMakeResident(ID3D12Device10 *This, D3D12_RESIDENCY_FLAGS flags,
         UINT n, ID3D12Pageable *const *objs, ID3D12Fence *fence, UINT64 value) {
     (void)This; (void)flags; (void)n; (void)objs;
@@ -21414,6 +21441,8 @@ static void build_vtables(void) {
     g_device_vtbl.GetCopyableFootprints1             = device_GetCopyableFootprints1;
     g_device_vtbl.CreateCommandQueue1                = device_CreateCommandQueue1;
     g_device_vtbl.SetResidencyPriority               = device_SetResidencyPriority;
+    g_device_vtbl.MakeResident                       = device_MakeResident;
+    g_device_vtbl.Evict                              = device_Evict;
     g_device_vtbl.EnqueueMakeResident                = device_EnqueueMakeResident;
     g_device_vtbl.RemoveDevice                       = device_RemoveDevice;
     g_device_vtbl.GetDeviceRemovedReason             = device_GetDeviceRemovedReason;
