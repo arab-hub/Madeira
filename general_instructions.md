@@ -6,7 +6,7 @@ How to read: read CORE, then only the Index categories the task touches. Grep `^
 
 | Category | Sections |
 |---|---|
-| Build | CI branches, cache keys, Official build versus CI |
+| Build | CI branches, cache keys, Official build versus CI, D3D12 DLL without CI |
 | Safety | Shared setups, deleting game files |
 | Performance | Default changes and their switches, Reading a slow frame, FEX lookup misses, Semaphores and the server, Render resolution |
 | Games | Per-game configs, JIT pool size, Address space budget, Cyberpunk 2077, Cyberpunk 2077 frame time |
@@ -33,6 +33,10 @@ END CORE
 ## Official build versus CI
 
 The official v0.2.0 IPA was built on the developer's machine, with `patches/wine-opengl-winios.patch` applied by hand. `tools/build/apply-wine-patches.sh` now does that in CI. To compare a CI build with the official one, count callers of `_ios_wow_base` in the executable (official 3,415) and read `arm64ec-windows/opengl32.dll`'s image base (official `0x180000000`).
+
+## D3D12 DLL without CI
+
+Any `madeira-d3d12/src` or FEX change rebuilds the whole `windows` component in CI (Wine for two architectures, DXMT, both FEX DLLs: 30-45 min). `madeira_d3d12.dll` builds on any host with llvm-mingw 20260421 (Windows build included) in seconds: the compile line of `build/madeira-d3d12/build-pe.sh`, an import library made from the shipped `winemetal.dll`'s exports (`llvm-dlltool -m arm64ec`), and the two Mac-only inputs taken from a CI-built DLL: its embedded metallibs (`MTLB`, size at +0x10) as `mad_kernels_metallib.h` / `mad_kernels_ios18_metallib.h`, and its `madeira_d3d12 bc1 converter <id>` string as `MAD_SC_CONVERTER_ID` (a new id reconverts every shader on the phone). Built that way from the same source, `.text` and `.data` matched the CI DLL byte for byte (2026-11-06). A `mad_kernels.metal` change still needs CI.
 
 # Safety
 
