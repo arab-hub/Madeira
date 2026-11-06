@@ -12,6 +12,7 @@ These patches are for Madeira only and are not to be sent to FEX-Emu.
 | Patch | What it fixes |
 |---|---|
 | `0001-windows-ios-smc-traps-per-16k-host-page.patch` | Self-modifying-code write traps per 16 KB iOS host page, both modules (The Escapists 2, Project Zomboid) |
+| `0002-ios-arm64ec-lean-l1-miss-path.patch` | L1 misses for compiled blocks skip CompileBlock's diagnostics, hot threads get an 8 MB L1, no Mach exception per 256 misses; ARM64EC module (Cyberpunk 2077: 250-460 K misses a second) |
 
 A patch must apply on the current FEX pin. When the pin moves, rebase the
 patches onto it (or drop a patch the new pin already covers).

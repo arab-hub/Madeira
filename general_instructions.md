@@ -8,7 +8,7 @@ How to read: read CORE, then only the Index categories the task touches. Grep `^
 |---|---|
 | Build | CI branches, cache keys, Official build versus CI |
 | Safety | Shared setups, deleting game files |
-| Performance | Default changes and their switches, Reading a slow frame |
+| Performance | Default changes and their switches, Reading a slow frame, FEX lookup misses, Semaphores and the server |
 | Games | Per-game configs, JIT pool size, Address space budget, Cyberpunk 2077, Cyberpunk 2077 frame time |
 
 # CORE
@@ -65,6 +65,15 @@ Direct requests and the lower-memory D3D12 options stay off, under Settings › 
 - `[xp]` gives cores used, P/E GHz and CPU mJ. On iPhone19,2 the P-cores ran 4.5 GHz at 5.6 W while loading, then 1.75 GHz at about 1.3 W once the GPU was busy (thermal `fair` within a minute). CPU and GPU share one power budget: GPU work saved buys CPU clock.
 - `[xp-api]`/`[xp-api-top]` count x64-to-native calls. About 1.1 M/s (QueryPerformanceCounter ~250 k, D3D12 methods ~700 k, GetCurrentThreadId ~10 k) is only a few percent of one core: not worth an x64 fast path.
 - `[xp-api-qpc]` counts QPC calls; `ntdll.dll+0x72818` is `RtlQueryPerformanceCounter` (already a user-mode `cntvct` read, ml1117).
+- `[xp-t]` lists per-thread CPU (`EP0110:73/98:...` = thread 0x110, ms on P/E cores in the 250 ms window). Cyberpunk's five job threads (0x110-0x120) sat near 50% each with the E-cores half idle: waiting on each other, not short of cores.
+
+## FEX lookup misses
+
+FEX's L2 lookup is off (`DisableL2Cache` defaults to true; `[lookup-cache] ml606 mode=l1-only`), so every miss of the JIT's per-thread L1 (direct-mapped, capped at 128 K entries on iOS by ml363) is a call into `CompileBlock`. `[CB_SUMMARY]` counts those calls (`real_compiles` flat means they were all cache hits) and `[l1-miss] ml1124` gives their rate. Its `hottest_rip` is stuck once the counter underflows (`repeats~1844...`): ignore it. Cyberpunk 2077 missed 250-460 K times a second during play. Before 0002, every 256th miss also read `system_clock` through kernelbase: an exec fault and a Mach exception each (`[xlate-exec]`/`[x18-redir2]` at the same pc, ~1,000 a second). `build/fex-patches/0002-ios-arm64ec-lean-l1-miss-path.patch` (ARM64EC module only) looks the block up before CompileBlock's diagnostics (`MADEIRA_FEX_FAST_MISS=0` off), gives up to 6 threads still missing 20 K/s an 8 MB L1 (`MADEIRA_FEX_BIG_L1`=K entries, `_THREADS`, `_RATE`; `[l1-big]` lines), and reads `cntvct_el0` instead. Not yet run on a device.
+
+## Semaphores and the server
+
+`[fastsync] ... sem=off` means semaphores are not on fastsync's cells. `[srv-req] ml1055` and `select by shape` then show the cost: Cyberpunk's job threads made ~11 K server requests a second (semaphore waits and releases, ~46 us per wake in `[sync-census] ml1122`). The game's own `env.MADEIRA_FASTSYNC_SEM = 1` (or Game details › Fast semaphore waits) moves them to the cells. dd39f3b took it out of the GTA V lists after a Dock-session loading stall, so check the first load.
 
 # Games
 

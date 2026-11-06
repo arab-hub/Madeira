@@ -1,0 +1,378 @@
+iOS/ARM64EC: a lean path for L1 misses, a bigger L1 for hot threads
+
+With the L2 off (DisableL2Cache) every miss of the JIT's L1 probe calls
+CompileBlock, and on iOS that path ran every diagnostic in front of the
+lookup before it found the block. Cyberpunk 2077 (patch 2.5, iPhone19,2,
+2026-11-06) missed 250-460 K times a second during play, 99% of them for
+blocks compiled long before ([CB_SUMMARY] real_compiles flat, [l1-miss]
+200-440 K/s), with its job threads' L1 at the 128 K-entry iOS cap.
+
+- CompileBlock: the lookup first. Cross-process work, the invalidation
+  lock shared, FindBlock, as the full path does them; a found block returns
+  at once. No block, a call-return pointer outside its stack or emission
+  locks held by this thread take the full path as before.
+  MADEIRA_FEX_FAST_MISS=0 restores the old order.
+- A thread still missing MADEIRA_FEX_BIG_L1_RATE (20000) times a second at
+  the cap gets an L1 of MADEIRA_FEX_BIG_L1 K entries (512 K, 8 MB) of its
+  own, for at most MADEIRA_FEX_BIG_L1_THREADS (6) threads: 48 MB at most.
+  Allocated by the owning thread with no lock held, switched in under the
+  lookup read lock. MADEIRA_FEX_BIG_L1=0 turns it off. [l1-big] lines.
+- UpdateDynamicL1Stats runs its work every 256th miss of a thread: the
+  process-wide [l1-miss] count adds 256 at a time instead of an atomic on
+  every miss, and the period uses cntvct_el0 instead of
+  std::chrono::system_clock, whose GetProcAddress'd kernelbase call is an
+  exec fault and a Mach exception on iOS (~1,000 a second, [xlate-exec]).
+
+ARM64EC module only (FEX_IOS_HOST and ARCHITECTURE_arm64ec); the WOW64
+module and the native iOS FEXCore build are unchanged. Applies on
+willfaust/FEX 1dc6ed4 after 0001. Madeira-only: not for FEX-Emu.
+
+diff --git a/FEXCore/Source/Interface/Core/Core.cpp b/FEXCore/Source/Interface/Core/Core.cpp
+index 8884ec0..40bab23 100644
+--- a/FEXCore/Source/Interface/Core/Core.cpp
++++ b/FEXCore/Source/Interface/Core/Core.cpp
+@@ -1367,6 +1367,23 @@ static inline uint64_t IosJitReverseTranslate(uint64_t Addr) {
+ #endif
+ #endif
+ 
++#if defined(FEX_IOS_HOST) && defined(ARCHITECTURE_arm64ec)
++/* Madeira 0002: the lookup of an already compiled block first. The JIT's L1 probe misses into
++ * CompileBlock, and on iOS that path ran every diagnostic below (pool-alias walk, code-buffer and
++ * bogus-RIP checks, the CB_SUMMARY counters shared by every thread, the HOT table) before its
++ * lookup found the block. Cyberpunk 2077 did that 250-460 K times a second during play, 99% of
++ * them for blocks compiled long before. MADEIRA_FEX_FAST_MISS=0 restores the old order. */
++static bool IosFastMissEnabled() {
++  static const bool Enabled = [] {
++    const char* Opt = getenv("MADEIRA_FEX_FAST_MISS");
++    const bool On = !(Opt && strcmp(Opt, "0") == 0);
++    LogMan::Msg::IFmt("FEX: fast-miss madeira-0002 enabled={}", On);
++    return On;
++  }();
++  return Enabled;
++}
++#endif
++
+ #ifdef FEX_IOS_HOST
+ /* ml648: publish the struct offsets the native Mach handler needs.
+  *
+@@ -1500,6 +1517,35 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
+   }
+ #endif
+ 
++#if defined(FEX_IOS_HOST) && defined(ARCHITECTURE_arm64ec)
++  /* Madeira 0002: an L1 miss for a block that is already compiled (see IosFastMissEnabled).
++   * The same steps as the lookup further down, in the same order: the cross-process work, the
++   * invalidation lock taken shared, then FindBlock (L1, then the shared block list). A call-return
++   * stack pointer outside its stack, or emission locks held by this thread, take the full path,
++   * which handles both. A RIP with no block (a first compile, a pool-copy alias, a bogus RIP)
++   * finds nothing here and goes on to the checks below as before. */
++  if (GuestRIP >= 0x10000 && IosFastMissEnabled()) {
++    bool CallRetInBounds = true;
++    if (const uint64_t CrBase = reinterpret_cast<uint64_t>(Thread->CallRetStackBase)) {
++      const uint64_t Crsp = Frame->State.callret_sp;
++      CallRetInBounds = Crsp >= CrBase && Crsp < CrBase + FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE;
++    }
++    if (CallRetInBounds && !FEXCore::Utils::WritePriorityMutex::IosEmissionLocksHeldBySelf()) {
++      static_cast<ContextImpl*>(Thread->CTX)->SyscallHandler->PreCompile();
++      uintptr_t HostCode {};
++      {
++        std::shared_lock<std::remove_reference_t<decltype(CodeInvalidationMutex)>> FastLock {CodeInvalidationMutex};
++        HostCode = Thread->LookupCache->FindBlock(Thread, GuestRIP);
++      }
++      if (HostCode) {
++        // A hot thread may get its bigger L1 now, with no lock held (LookupCache::IosGrowL1).
++        Thread->LookupCache->IosGrowL1IfWanted(Thread);
++        return HostCode;
++      }
++    }
++  }
++#endif
++
+ #ifdef FEX_IOS_HOST
+   /* The capture buffers reported below exist only in the FEX_IOS_HOST (Windows module)
+    * builds, not in the native iOS FEXCore libraries that build/fex-ios makes. */
+diff --git a/FEXCore/Source/Interface/Core/LookupCache.cpp b/FEXCore/Source/Interface/Core/LookupCache.cpp
+index 1b93edb..ebcc090 100644
+--- a/FEXCore/Source/Interface/Core/LookupCache.cpp
++++ b/FEXCore/Source/Interface/Core/LookupCache.cpp
+@@ -15,6 +15,7 @@ $end_info$
+ 
+ #ifdef FEX_IOS_HOST
+ #include <atomic>
++#include <cstdlib>
+ #include <cstring>
+ #endif
+ 
+@@ -33,6 +34,69 @@ static std::atomic<uint64_t> LookupCacheLive {0};
+ static std::atomic<uint64_t> LookupCacheCumulative {0};
+ static std::atomic<uint64_t> LookupCacheBytesLive {0};
+ 
++#if defined(FEX_IOS_HOST) && defined(ARCHITECTURE_arm64ec)
++/* Madeira 0002: a hot thread's own bigger L1.
++ *
++ * ml363 capped every thread's L1 at 128 K entries (2 MB) because L1 inserts scatter over the
++ * whole array, so a big one dirties all its pages: at 16 MB for each of ~40 threads that was 1 GB
++ * against the jetsam limit. The L2 is off (DisableL2Cache), so each L1 miss is a C++ lookup. In
++ * Cyberpunk 2077 the five job threads and the main thread missed 30-80 K times a second each with
++ * their L1 at the cap, 250-460 K a second in all, for blocks compiled long before (conflicts in a
++ * direct-mapped table, not new code). A thread still missing MADEIRA_FEX_BIG_L1_RATE times a second
++ * (20000) at the cap gets one array of MADEIRA_FEX_BIG_L1 K entries (512 K, 8 MB) of its own, for
++ * at most MADEIRA_FEX_BIG_L1_THREADS threads (6): 48 MB at most, for the threads that need it.
++ * MADEIRA_FEX_BIG_L1=0 turns it off. [l1-big] lines show each one. */
++static std::atomic<int> IosBigL1Live {0};
++
++static uint64_t IosEnvU64(const char* Name, uint64_t Default) {
++  const char* V = getenv(Name);
++  if (!V || !*V) {
++    return Default;
++  }
++  char* End = nullptr;
++  const unsigned long long N = strtoull(V, &End, 10);
++  return (End && *End == '\0') ? N : Default;
++}
++
++static size_t IosBigL1Entries() {
++  static const size_t Entries = [] {
++    uint64_t K = IosEnvU64("MADEIRA_FEX_BIG_L1", 512);
++    if (K > 4096) {
++      K = 4096;
++    }
++    // A power of two, as the L1 mask needs.
++    return K ? size_t(1) << (63 - __builtin_clzll(K * 1024)) : size_t(0);
++  }();
++  return Entries;
++}
++
++static int IosBigL1MaxThreads() {
++  static const int Threads = [] {
++    const uint64_t N = IosEnvU64("MADEIRA_FEX_BIG_L1_THREADS", 6);
++    return int(N > 32 ? 32 : N);
++  }();
++  return Threads;
++}
++
++static uint64_t IosBigL1Rate() {
++  static const uint64_t Rate = IosEnvU64("MADEIRA_FEX_BIG_L1_RATE", 20000);
++  return Rate;
++}
++
++// The CPU's own timer, readable at EL0 (as Wine's RtlQueryPerformanceCounter reads it).
++static inline uint64_t IosTicks() {
++  uint64_t T;
++  __asm__ volatile("isb\n\tmrs %0, cntvct_el0" : "=r"(T)::"memory");
++  return T;
++}
++
++static inline uint64_t IosTickFrequency() {
++  uint64_t F;
++  __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(F));
++  return F ? F : 24000000;
++}
++#endif
++
+ LookupCache::LookupCache(FEXCore::Context::ContextImpl* CTX)
+   : ctx {CTX} {
+ 
+@@ -156,6 +220,13 @@ LookupCache::~LookupCache() {
+   // describe the full layout and are wrong (PagePointer is 0) in L1-only mode.
+   FEXCore::Allocator::VirtualFree(reinterpret_cast<void*>(AllocationBase), AllocationSize);
+   ctx->SyscallHandler->UnmarkOvercommitRange(AllocationBase, AllocationSize);
++#if defined(FEX_IOS_HOST) && defined(ARCHITECTURE_arm64ec)
++  if (IosBigL1Base) {
++    FEXCore::Allocator::VirtualFree(reinterpret_cast<void*>(IosBigL1Base), IosBigL1Size);
++    ctx->SyscallHandler->UnmarkOvercommitRange(IosBigL1Base, IosBigL1Size);
++    IosBigL1Live.fetch_sub(1, std::memory_order_relaxed);
++  }
++#endif
+ 
+   LookupCacheLive.fetch_sub(1, std::memory_order_relaxed);
+   LookupCacheBytesLive.fetch_sub(AllocationSize, std::memory_order_relaxed);
+@@ -185,6 +256,12 @@ void LookupCache::ClearThreadLocalCaches(const LookupCacheWriteLockToken&) {
+   // ml606: clear exactly what is mapped. In L1-only mode that is the L1 array
+   // alone; using TotalCacheSize here would decommit 48MB we never allocated.
+   FEXCore::Allocator::VirtualDontNeed(reinterpret_cast<void*>(AllocationBase), AllocationSize, false);
++#if defined(FEX_IOS_HOST) && defined(ARCHITECTURE_arm64ec)
++  // Madeira 0002: a hot thread's bigger L1 is the one its JIT reads.
++  if (IosBigL1Base) {
++    FEXCore::Allocator::VirtualDontNeed(reinterpret_cast<void*>(IosBigL1Base), IosBigL1Size, false);
++  }
++#endif
+ 
+   // TODO: Rename this member to avoid confusion with code caching
+   CachedCodePages.clear();
+@@ -196,6 +273,116 @@ void LookupCache::ClearCache(const LookupCacheWriteLockToken& lk) {
+   Shared->ClearCache(lk);
+ }
+ 
++#if defined(FEX_IOS_HOST) && defined(ARCHITECTURE_arm64ec)
++// Madeira 0002: UpdateDynamicL1Stats's work, run on every 256th miss of this thread.
++void LookupCache::IosUpdateL1Stats(FEXCore::Core::InternalThreadState* Thread) {
++  { /* ml1124: process-wide L1-miss rate (every 2^20 misses, with the time), counted 256 at a time */
++    static std::atomic<uint64_t> IosL1Misses {0};
++    static std::atomic<uint64_t> IosL1LastTicks {0};
++    const uint64_t M = IosL1Misses.fetch_add(256, std::memory_order_relaxed) + 256;
++    if ((M & 0xfffff) == 0) {
++      const uint64_t Now = IosTicks();
++      const uint64_t Last = IosL1LastTicks.exchange(Now, std::memory_order_relaxed);
++      if (Last && Now > Last) {
++        LogMan::Msg::EFmt("[l1-miss] ml1124 {} L1 misses total, {:.0f}/s over the last 2^20", M,
++                          1048576.0 * double(IosTickFrequency()) / double(Now - Last));
++      }
++    }
++  }
++
++  const uint64_t Now = IosTicks();
++  const uint64_t Frequency = IosTickFrequency();
++  if (!IosLastPeriodTicks) {
++    IosLastPeriodTicks = Now;
++    L2L3CacheHits = 0;
++    return;
++  }
++  const uint64_t Elapsed = Now - IosLastPeriodTicks;
++  if (Elapsed < Frequency) {
++    return; // The heuristic's one-second period.
++  }
++
++  const double AveragePerSecond = double(L2L3CacheHits) * double(Frequency) / double(Elapsed);
++  if (AveragePerSecond >= DynamicL1CacheIncreaseCountHeuristic()) {
++    if (CurrentL1Entries < L1Capacity) {
++      CurrentL1Entries <<= 1;
++      L1PointerMask = CurrentL1Entries - 1;
++      // Since we're in C-code, this is safe to update here.
++      Thread->CurrentFrame->State.L1Mask = GetScaledL1PointerMask();
++    } else if (!IosBigL1Tried && AveragePerSecond >= double(IosBigL1Rate()) && IosBigL1Entries() > L1Capacity) {
++      IosWantBigL1 = true; // IosGrowL1, once no lock is held.
++    }
++  } else if (AveragePerSecond < DynamicL1CacheDecreaseCountHeuristic()) {
++    if (CurrentL1Entries > MIN_L1_ENTRIES) {
++      CurrentL1Entries >>= 1;
++      L1PointerMask = CurrentL1Entries - 1;
++
++      // Madvise the entries that we are dropping. Gives the memory back to the OS.
++      LookupCacheEntry* FirstZeroL1Entry = &reinterpret_cast<LookupCacheEntry*>(L1Pointer)[CurrentL1Entries];
++      const size_t ZeroMemorySize = (L1Capacity - CurrentL1Entries) * sizeof(LookupCacheEntry);
++      FEXCore::Allocator::VirtualDontNeed(FirstZeroL1Entry, ZeroMemorySize, false);
++
++      Thread->CurrentFrame->State.L1Mask = GetScaledL1PointerMask();
++    }
++  }
++
++  IosLastPeriodTicks = Now;
++  L2L3CacheHits = 0;
++}
++
++// Madeira 0002: gives this (hot) thread its own bigger L1. The owning thread, no lock held: the
++// allocation can reach FEX's own memory notifications, which take the invalidation lock.
++void LookupCache::IosGrowL1(FEXCore::Core::InternalThreadState* Thread) {
++  IosWantBigL1 = false;
++  if (IosBigL1Tried) {
++    return;
++  }
++  IosBigL1Tried = true;
++
++  const size_t Entries = IosBigL1Entries();
++  if (Entries <= L1Capacity) {
++    return;
++  }
++  const int Slot = IosBigL1Live.fetch_add(1, std::memory_order_relaxed);
++  if (Slot >= IosBigL1MaxThreads()) {
++    IosBigL1Live.fetch_sub(1, std::memory_order_relaxed);
++    static std::atomic<int> Refusals {0};
++    if (Refusals.fetch_add(1, std::memory_order_relaxed) < 4) {
++      LogMan::Msg::EFmt("[l1-big] madeira-0002 no bigger L1 for one more hot thread: {} have one (MADEIRA_FEX_BIG_L1_THREADS)",
++                        IosBigL1MaxThreads());
++    }
++    return;
++  }
++
++  const size_t Size = Entries * sizeof(LookupCacheEntry);
++  void* Mem = FEXCore::Allocator::VirtualAlloc(Size, false, true);
++  if (!Mem || Mem == reinterpret_cast<void*>(~uintptr_t {0})) {
++    IosBigL1Live.fetch_sub(1, std::memory_order_relaxed);
++    LogMan::Msg::EFmt("[l1-big] madeira-0002 {} MB for a bigger L1 not allocated; the thread keeps {} K entries", Size >> 20,
++                      L1Capacity >> 10);
++    return;
++  }
++  const size_t Stale = FEXCore::Allocator::ZeroScrub(Mem, Size);
++  ctx->SyscallHandler->MarkOvercommitRange(reinterpret_cast<uintptr_t>(Mem), Size);
++
++  {
++    // Another thread's InvalidateCache and ClearThreadLocalCaches write this L1 under the write lock.
++    auto lk = Shared->AcquireReadLock();
++    IosBigL1Base = reinterpret_cast<uintptr_t>(Mem);
++    IosBigL1Size = Size;
++    L1Pointer = IosBigL1Base;
++    L1Capacity = Entries;
++    CurrentL1Entries = Entries;
++    L1PointerMask = Entries - 1;
++    // The JIT reads both from the frame on every probe; this thread is in C++ now.
++    Thread->CurrentFrame->State.L1Pointer = L1Pointer;
++    Thread->CurrentFrame->State.L1Mask = GetScaledL1PointerMask();
++  }
++  LogMan::Msg::EFmt("[l1-big] madeira-0002 a hot thread's own L1: {} K entries ({} MB, {} stale bytes), {} of {} threads",
++                    Entries >> 10, Size >> 20, Stale, Slot + 1, IosBigL1MaxThreads());
++}
++#endif
++
+ void GuestToHostMap::ClearCache(const LookupCacheWriteLockToken&) {
+   // Allocate a new pointer from the BlockLinks pma again.
+   BlockLinks = BlockLinks_pma->new_object<BlockLinksMapType>();
+diff --git a/FEXCore/Source/Interface/Core/LookupCache.h b/FEXCore/Source/Interface/Core/LookupCache.h
+index 3a43785..52701e1 100644
+--- a/FEXCore/Source/Interface/Core/LookupCache.h
++++ b/FEXCore/Source/Interface/Core/LookupCache.h
+@@ -252,10 +252,35 @@ public:
+     return HostPtr;
+   }
+ 
++#if defined(FEX_IOS_HOST) && defined(ARCHITECTURE_arm64ec)
++  // Madeira 0002: a hot thread's own bigger L1 (IosGrowL1, LookupCache.cpp). Called by the
++  // owning thread from CompileBlock with no lock held.
++  void IosGrowL1IfWanted(FEXCore::Core::InternalThreadState* Thread) {
++    if (IosWantBigL1) [[unlikely]] {
++      IosGrowL1(Thread);
++    }
++  }
++#else
++  void IosGrowL1IfWanted(FEXCore::Core::InternalThreadState*) {}
++#endif
++
+   void UpdateDynamicL1Stats(FEXCore::Core::InternalThreadState* Thread) {
+     // If host pointer was found in L2 or L3, then add it to the counter.
+     // Keeping track not L1 misses, but specifically L2/L3 hits.
+     ++L2L3CacheHits;
++#if defined(FEX_IOS_HOST) && defined(ARCHITECTURE_arm64ec)
++    /* Madeira 0002: every 256th miss only. The rest of this function ran a shared atomic on
++     * every miss (the [l1-miss] count, one cache line for all threads) and read
++     * std::chrono::system_clock every 256th, which is a call through a GetProcAddress'd
++     * kernelbase pointer: an exec fault and a Mach exception each time on iOS (about 1,000 a
++     * second in Cyberpunk 2077, the [xlate-exec] lines). IosUpdateL1Stats counts the batch and
++     * reads the CPU's own timer. */
++    if (L2L3CacheHits & 0xff) {
++      return;
++    }
++    IosUpdateL1Stats(Thread);
++    return;
++#endif
+ #ifdef FEX_IOS_HOST
+     {   /* ml1124: process-wide L1-miss rate (every 2^20 misses, with the time) */
+       static std::atomic<uint64_t> IosL1Misses {0};
+@@ -575,6 +600,18 @@ private:
+   uint64_t VirtualMemSize {};
+ 
+   size_t CurrentL1Entries = MIN_L1_ENTRIES;
++#if defined(FEX_IOS_HOST) && defined(ARCHITECTURE_arm64ec)
++  // Madeira 0002: the entries the L1 array at L1Pointer holds (MAX_L1_ENTRIES, or the bigger
++  // array IosGrowL1 gave a hot thread), the bigger array itself, and the batch timer.
++  void IosUpdateL1Stats(FEXCore::Core::InternalThreadState* Thread);
++  void IosGrowL1(FEXCore::Core::InternalThreadState* Thread);
++  size_t L1Capacity = MAX_L1_ENTRIES;
++  bool IosWantBigL1 {};
++  bool IosBigL1Tried {};
++  uintptr_t IosBigL1Base {};
++  size_t IosBigL1Size {};
++  uint64_t IosLastPeriodTicks {};
++#endif
+   uint64_t L2L3CacheHits {};
+   std::chrono::time_point<std::chrono::system_clock> LastPeriod {};
+   constexpr static std::chrono::seconds SamplePeriod {1};
