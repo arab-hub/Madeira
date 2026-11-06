@@ -318,6 +318,27 @@ static void test_why( void )
     CHECK( !ios_swap_eligible( g, (8u << 20) - 1, rw, &v ), "classic: under 8 MB refused" );
     CHECK( !ios_swap_eligible( low, 64u << 20, rw, &v ), "classic: band only" );
     CHECK( ios_swap_eligible( (void *)0x7000100000ULL, 64u << 20, rw, &v ), "classic: no FEX/JIT exclusion (as before)" );
+
+    /* ml1298b: arena-mb moved the arena below the hardware band (Cyberpunk 2077,
+     * 2026-11-06: 8 GB at 0x7827e80000). The guest's pools in the band are backed,
+     * the moved arena is still never backed, and nothing past the map's end is. */
+    {
+        ULONG_PTR sb = ios_fex_arena_base_unix, se = ios_fex_arena_end_unix;
+        ios_fex_arena_base_unix = 0x7827e80000ULL; ios_fex_arena_end_unix = 0x7a27e80000ULL;
+        env( "broad", NULL, NULL );
+        CHECK( ios_swap_why( (void *)0x7c27e80000ULL, 64u << 20, rw, &v ) == IOS_SW_BACKED,
+               "moved arena: a guest pool in the hardware band is backed" );
+        CHECK( ios_swap_why( (void *)0x7e80000000ULL, 64u << 20, rw, &v ) == IOS_SW_BACKED,
+               "moved arena: a reserve's real part against the map's end is backed" );
+        CHECK( ios_swap_why( (void *)0x7900000000ULL, 64u << 20, rw, &v ) == IOS_SW_FEXJIT,
+               "moved arena: the arena itself is still never backed" );
+        CHECK( ios_swap_why( (void *)0x7ffff00000ULL, 2u << 20, rw, &v ) == IOS_SW_BAND,
+               "moved arena: past the map's end is left out" );
+        ios_fex_arena_base_unix = sb; ios_fex_arena_end_unix = se;
+        env( "broad", NULL, NULL );
+        CHECK( ios_swap_why( (void *)0x7bf0000000ULL, 0x20000000, rw, &v ) == IOS_SW_FEXJIT,
+               "hardware arena: a range reaching into it is still never backed" );
+    }
 }
 
 /* model check of take/give with merging (blocks) */

@@ -23632,6 +23632,18 @@ static int ios_swap_eligible( const void *base, size_t size, unsigned int vprot,
     return 1;
 }
 /* blocks/wide/broad: why a range is (not) eligible; the census counts by this. */
+/* ml1298b: broad coverage leaves out "FEX's band and above". That band was
+ * [0x7c00000000, 0x8000000000) because the arena always sat there; arena-mb
+ * moves it lower, and the guest's own pools then fill the hardware band. With
+ * an arena published, ios_swap_is_fexjit already excludes it by its real
+ * range, so only a range past the map's end is left out here. Cyberpunk 2077
+ * kept three 4 GB pools and the 6 GB real part of its 64 GB reserve out of the
+ * file this way and reached the 6 GB footprint limit (2026-11-06). */
+static int ios_swap_past_band( uintptr_t b, size_t size )
+{
+    if (ios_fex_arena_end_unix > ios_fex_arena_base_unix) return b + size > 0x8000000000ULL;
+    return b + size > 0x7c00000000ULL;
+}
 static int ios_swap_is_fexjit( uintptr_t b, size_t size )
 {
     uintptr_t e = b + size, rx = (uintptr_t)ios_jit_rx_base_global, rw = (uintptr_t)ios_jit_rw_base_global;
@@ -23795,7 +23807,7 @@ static int ios_swap_why( const void *base, size_t size, unsigned int vprot, stru
         (view->protect & (SEC_FILE | SEC_IMAGE | SEC_RESERVE | VPROT_SYSTEM | VPROT_PLACEHOLDER |
                           VPROT_FREE_PLACEHOLDER | VPROT_ARM64EC | VPROT_WRITEWATCH))) return IOS_SW_VIEW;
     if (ios_swap_is_fexjit( b, size )) return IOS_SW_FEXJIT;
-    if (ios_swap_broad) { if (b + size > 0x7c00000000ULL) return IOS_SW_BAND; }   /* ml1257: FEX's band and above */
+    if (ios_swap_broad) { if (ios_swap_past_band( b, size )) return IOS_SW_BAND; }   /* ml1257: FEX's band and above; ml1298b */
     else if (!ios_swap_wide && (b < 0x7000000000ULL || b >= 0x7c00000000ULL)) return IOS_SW_BAND;
     if (size < ios_swap_min) return IOS_SW_SMALL;
     if (ios_swap_churny( size ) && !ios_swap_churn_exempt( b, size )) { ios_swap_churn_skips++; return IOS_SW_CHURN; }   /* ml1258 */
@@ -24282,7 +24294,7 @@ static int ios_swap_whole_resv( struct file_view *view, unsigned int vprot )
     { ios_swap_skip_bytes[IOS_SWK_VIEW] += view->size; return 0; }
     if (view->size < ios_swap_min) { ios_swap_skip_bytes[IOS_SWK_SMALL] += view->size; return 0; }
     if (view->size > ios_swap_resv_max) { ios_swap_skip_bytes[IOS_SWK_BIG] += view->size; return 0; }
-    if (ios_swap_is_fexjit( b, view->size ) || b + view->size > 0x7c00000000ULL)
+    if (ios_swap_is_fexjit( b, view->size ) || ios_swap_past_band( b, view->size ))   /* ml1298b */
     { ios_swap_skip_bytes[IOS_SWK_FEXJIT] += view->size; return 0; }
     if (ios_swap_n && ios_swap_overlaps( view->base, view->size )) { ios_swap_skip_bytes[IOS_SWK_OVERLAP] += view->size; return 0; }
     if (ios_swap_churny( view->size ) && !ios_swap_churn_exempt( b, view->size ))   /* ml1258; ml2021: not beside/inside a 32-bit program */
