@@ -8,7 +8,7 @@ How to read: read CORE, then only the Index categories the task touches. Grep `^
 |---|---|
 | Build | CI branches, cache keys, Official build versus CI |
 | Safety | Shared setups, deleting game files |
-| Performance | Default changes and their switches, Reading a slow frame, FEX lookup misses, Semaphores and the server |
+| Performance | Default changes and their switches, Reading a slow frame, FEX lookup misses, Semaphores and the server, Render resolution |
 | Games | Per-game configs, JIT pool size, Address space budget, Cyberpunk 2077, Cyberpunk 2077 frame time |
 
 # CORE
@@ -70,6 +70,10 @@ Direct requests and the lower-memory D3D12 options stay off, under Settings › 
 ## FEX lookup misses
 
 FEX's L2 lookup is off (`DisableL2Cache` defaults to true; `[lookup-cache] ml606 mode=l1-only`), so every miss of the JIT's per-thread L1 (direct-mapped, capped at 128 K entries on iOS by ml363) is a call into `CompileBlock`. `[CB_SUMMARY]` counts those calls (`real_compiles` flat means they were all cache hits) and `[l1-miss] ml1124` gives their rate. Its `hottest_rip` is stuck once the counter underflows (`repeats~1844...`): ignore it. Cyberpunk 2077 missed 250-460 K times a second during play. Before 0002, every 256th miss also read `system_clock` through kernelbase: an exec fault and a Mach exception each (`[xlate-exec]`/`[x18-redir2]` at the same pc, ~1,000 a second). `build/fex-patches/0002-ios-arm64ec-lean-l1-miss-path.patch` (ARM64EC module only) looks the block up before CompileBlock's diagnostics (`MADEIRA_FEX_FAST_MISS=0` off), gives up to 6 threads still missing 20 K/s an 8 MB L1 (`MADEIRA_FEX_BIG_L1`=K entries, `_THREADS`, `_RATE`; `[l1-big]` lines), and reads `cntvct_el0` instead. Not yet run on a device.
+
+## Render resolution
+
+Game details › Display › Render resolution (`LibraryEntry.renderScale`, 0.5-0.95, nil = 100%) shrinks the virtual monitor, the Dock desktop (ContentView.startDock) and `/desktop=shell,` to `renderResolution` and writes `metalfx-upscale` as Resolution ÷ that size (3 decimals). The D3D12 runtime and DXMT take 1.1-2; below 1.1 (95%) MetalFX stays off and Core Animation stretches. At 100% the 1.5x / 2x picker shows as before. Not yet run on a device.
 
 ## Semaphores and the server
 
