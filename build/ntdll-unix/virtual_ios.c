@@ -32589,12 +32589,41 @@ static NTSTATUS ios_oversize_place_top( void **base, SIZE_T *sz, ULONG type, ULO
     return STATUS_NO_MEMORY;
 }
 
+/* ml1298c: pools served in part. Cyberpunk 2077 2.5 reserves five 4 GB pools
+ * and commits 1-24 MB in each (16 GB pool: 604 MB), then asks for a sixth about
+ * three minutes into play; with 8 GB free in pieces of 3 GB and less the request
+ * fails and the game stops ("Out of Memory"). oversize-reserve-min-mb below 65536
+ * lets an unhinted reserve of at least that size that fails every real placement
+ * be served with a real part of oversize-pool-real-mb (halved down to 256 MB
+ * while no hole fits), like ml1298's 64 GB case. Opt-in per game: the rest of
+ * such a pool is not mapped, and a commit past the real part fails (or, where
+ * the address is someone else's view, lands in it), so it is meant for pools a
+ * game reserves far beyond what it commits. */
+static SIZE_T ios_oversize_min( void )
+{
+    static SIZE_T v;
+    if (!v)
+    {
+        long long mb = madeira_cfg_int( "oversize-reserve-min-mb", 65536 );   /* ml1298c: smallest failed unhinted reserve served in part (MB); below 65536 also pools */
+        if (mb < 1024) mb = 1024;
+        if (mb > 65536) mb = 65536;
+        v = (SIZE_T)mb << 20;
+    }
+    return v;
+}
+static long long ios_oversize_pool_real_mb( void )
+{
+    static long long mb = -1;
+    if (mb < 0) mb = madeira_cfg_int( "oversize-pool-real-mb", 1024 );   /* ml1298c: real part of a reserve under 64 GB served in part (MB) */
+    return mb;
+}
+
 static NTSTATUS ios_oversize_reserve( void **ret, SIZE_T *size_ptr, ULONG type, ULONG protect )
 {
     long long cap_mb = ios_oversize_real_mb();
     SIZE_T want = *size_ptr, real, floor;
 
-    if (*ret || want < IOS_OVERSIZE_MIN || (type & ~MEM_TOP_DOWN) != MEM_RESERVE) return STATUS_NO_MEMORY;
+    if (*ret || want < ios_oversize_min() || (type & ~MEM_TOP_DOWN) != MEM_RESERVE) return STATUS_NO_MEMORY;   /* ml1298c */
     if (cap_mb <= 0)
     {
         static int said;
@@ -32606,6 +32635,15 @@ static NTSTATUS ios_oversize_reserve( void **ret, SIZE_T *size_ptr, ULONG type, 
     }
     real = (SIZE_T)cap_mb << 20;
     floor = min( real, (SIZE_T)1 << 30 );
+    if (want < IOS_OVERSIZE_MIN)   /* ml1298c: a pool */
+    {
+        long long pm = ios_oversize_pool_real_mb();
+        if (pm <= 0) return STATUS_NO_MEMORY;
+        real = min( real, (SIZE_T)pm << 20 );
+        if (real > want / 2) real = (want / 2) & ~(SIZE_T)(IOS_OVERSIZE_ALIGN - 1);
+        floor = min( real, (SIZE_T)256 << 20 );
+        if (!real) return STATUS_NO_MEMORY;
+    }
     if (ios_fft_arena_size > floor) floor = ios_fft_arena_size;   /* ml1299: the patched arena must be real */
     for (; real >= floor; real >>= 1)
     {
@@ -32613,7 +32651,7 @@ static NTSTATUS ios_oversize_reserve( void **ret, SIZE_T *size_ptr, ULONG type, 
         SIZE_T sz = real, full = ROUND_SIZE( 0, want, page_mask );
         unsigned slot;
 
-        if (ios_oversize_top() && !ios_fft_arena_size)
+        if (ios_oversize_top() && !ios_fft_arena_size && want >= IOS_OVERSIZE_MIN)   /* ml1298c: pools take a normal hole */
         {
             if (ios_oversize_place_top( &base, &sz, type, protect )) continue;
         }
