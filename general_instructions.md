@@ -8,8 +8,8 @@ How to read: read CORE, then only the Index categories the task touches. Grep `^
 |---|---|
 | Build | CI branches, cache keys, Official build versus CI |
 | Safety | Shared setups, deleting game files |
-| Performance | Default changes and their switches |
-| Games | Per-game configs, JIT pool size, Address space budget, Cyberpunk 2077 |
+| Performance | Default changes and their switches, Reading a slow frame |
+| Games | Per-game configs, JIT pool size, Address space budget, Cyberpunk 2077, Cyberpunk 2077 frame time |
 
 # CORE
 
@@ -59,6 +59,13 @@ Commit dd39f3b removed lean plus `FASTSYNC_SEM` from the GTA V lists after loadi
 
 Direct requests and the lower-memory D3D12 options stay off, under Settings › Performance experiments.
 
+## Reading a slow frame
+
+- `[perf] ml1108`/`ml1119`/`ml1109` (every 5 s) give fps, GPU ms per present, ExecuteCommandLists ms on the game's thread, and ms the game sat in fence waits. GPU busy well under 100% while the game is blocked means CPU and GPU take turns.
+- `[xp]` gives cores used, P/E GHz and CPU mJ. On iPhone19,2 the P-cores ran 4.5 GHz at 5.6 W while loading, then 1.75 GHz at about 1.3 W once the GPU was busy (thermal `fair` within a minute). CPU and GPU share one power budget: GPU work saved buys CPU clock.
+- `[xp-api]`/`[xp-api-top]` count x64-to-native calls. About 1.1 M/s (QueryPerformanceCounter ~250 k, D3D12 methods ~700 k, GetCurrentThreadId ~10 k) is only a few percent of one core: not worth an x64 fast path.
+- `[xp-api-qpc]` counts QPC calls; `ntdll.dll+0x72818` is `RtlQueryPerformanceCounter` (already a user-mode `cntvct` read, ml1117).
+
 # Games
 
 ## Per-game configs
@@ -80,3 +87,7 @@ The fault handler in `signal_arm64_ios.c` repairs emulator pages (restore R|X, z
 ## Cyberpunk 2077
 
 Reserves 16 GB, 64 GB, 32 GB (fails, falls back to 2 x 1 GB), then five 4 GB pools and more 1 GB ones: about 103 GB, against 55 GB free. Budgets follow the reported RAM (`totalphys`): at 6 GB the load ran out of memory (CrashInfo.json `isOom`), at 12 GB Wwise failed (`wwiseAllocator.cpp`: "Those allocations are not expected to ever need reallocation", and a lost wake-up of `AK::IOThread` at start-up). Its crash files are `users/mobile/AppData/Local/CD Projekt Red/Cyberpunk 2077/CrashInfo.json` and `REDEngine/ReportQueue`. `REDEngineErrorReporter.exe` starts 10 s into every launch and waits; it is not a crash by itself.
+
+## Cyberpunk 2077 frame time
+
+Run of 2026-11-06 12:58 (list v2, FSR2 Performance, FSR3 frame generation on, 1408x648): 17-18 presents/s, frame 54-58 ms, GPU 22-23 ms (38-43% busy), ExecuteCommandLists 9.6-11.5 ms on the render thread, game blocked in fence waits 16 ms. About 265 encoders per frame, 253 of them synced; 162 render passes moving ~360 MB of attachments (115 MB stored and never used in the list). `amd_fidelityfx_framegeneration_dx12.dll` loaded: about half the presents are generated frames. Next test: `FrameGeneration = Off` and `FacialTangentUpdates = false` in UserSettings.json, `async-submit = 1` in the game config (untested in any list so far).
