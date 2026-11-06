@@ -1260,6 +1260,7 @@ DEFINE_GUID(IID_ID3D12GraphicsCommandList8, 0xee936ef9, 0x599d, 0x4d28, 0x93, 0x
  * application's memory alive for the object's whole life. */
 struct mad_rootsig {
     ID3D12RootSignatureVtbl *vtbl; LONG refs; const IID *iid; const char *name;
+    UINT64 serial;   /* air-plan: unique per root signature ever created (an address can be reused) */
     struct madeira_ir_root_param params[MAD_ROOT_PARAM_MAX];
     /* ml1009: sized to the blob, allocated in the SAME block as this object so
      * the one free() in mad_release still releases everything.
@@ -6870,6 +6871,33 @@ static int mad_air_texbuf(struct mad_device *d, UINT64 view_id, UINT32 *count, U
     return mad_vmap_get(d, view_id, count, first);
 }
 
+/* madeira-bcd air-plan: mad_air_flat_view then mad_air_array_len took the
+ * device's view_lock twice for every texture binding of every draw (and the
+ * game's own threads take it to make views). In the common case, a view whose
+ * flat answer is known to be itself, one probe gives both; otherwise the two
+ * calls run as before, so the result is the same either way. */
+static int g_air_vmerge = -1;   /* madeira.cfg air-view-merge (default 1) */
+static UINT64 mad_air_view_flat_len(struct mad_device *d, UINT64 id, int flatten, UINT *len) {
+    UINT64 flat = 0; UINT32 a = 0; int found = 0; unsigned i;
+    if (id && id != MAD_VREC_TOMB) {
+        EnterCriticalSection(&d->view_lock);
+        if (d->vmap_cap) {
+            i = mad_vmap_slot(id, d->vmap_cap);
+            while (d->vmap[i].id) {
+                if (d->vmap[i].id == id) { flat = d->vmap[i].flat; a = d->vmap[i].a; found = 1; break; }
+                i = (i + 1) & (d->vmap_cap - 1);
+            }
+        }
+        LeaveCriticalSection(&d->view_lock);
+    }
+    if (found && a && (!flatten || flat == 1)) { *len = a; return id; }
+    {
+        UINT64 v = flatten ? mad_air_flat_view(d, id) : id;
+        *len = mad_air_array_len(d, v);
+        return v;
+    }
+}
+
 static UINT mad_air_range_type(UINT air_type) {
     switch (air_type) {
     case MADEIRA_IR_AIR_CBV:     return MADEIRA_IR_RANGE_CBV;
@@ -7003,6 +7031,169 @@ static int mad_air_resolve(struct mad_exec *e, const struct mad_rootsig *rs, con
     }
     *why = "no root-signature entry covers this register";
     return 0;
+}
+
+/* madeira-bcd air-plan (default 0; madeira.cfg air-plan = 1 turns it on).
+ * Measured before it was enabled anywhere: with Cyberpunk 2077's 36-parameter
+ * signature the walk below costs 36.6 ns a binding on a desktop core and the
+ * planned lookup 38.4 ns (the TlsGetValue and the hash cost what the walk
+ * does), so it stays off; kept because it is proven equal (2.88 M random
+ * cases, the same results and reasons) for a signature with far more ranges.
+ *
+ * mad_air_resolve finds the root parameter and descriptor-table slot of one
+ * shader binding by walking every parameter and every range of the root
+ * signature. It ran for every binding of every stage of every draw and
+ * dispatch: in Cyberpunk 2077 the D3D12 worker spent 24-32 ms a frame
+ * replaying, ~18 ms of it outside Metal's own calls (2026-11-06 21:59). Where
+ * a binding lives depends only on the root signature (immutable once made),
+ * the binding's type, space and register, and the stage's visibility mask, so
+ * the walk now runs once per such key and records its result (the plan); every
+ * draw still reads the live table address, heap, descriptor and constants and
+ * makes the same checks, with the same reasons, in the same order. Plans sit
+ * in a per-thread direct-mapped cache keyed on those values plus the root
+ * signature's creation serial, so a freed signature whose address comes back
+ * cannot hit an old plan. */
+enum { MAD_PLAN_FAIL, MAD_PLAN_TABLE, MAD_PLAN_CONSTS, MAD_PLAN_ROOTDESC, MAD_PLAN_STATIC };
+struct mad_plan_ent {
+    const struct mad_rootsig *rs; UINT64 serial;
+    UINT32 type, space, lower, vis;
+    UINT32 kind, param, idx, smp;   /* idx: table slot (TABLE), constant count (CONSTS), sampler index (STATIC) */
+    const char *why;                /* FAIL */
+};
+#define MAD_PLAN_SLOTS 2048
+static volatile DWORD g_plan_tls = TLS_OUT_OF_INDEXES;
+static int g_air_plan = -1;
+static volatile LONG g_plan_misses;
+static void mad_air_plan(const struct mad_rootsig *rs, const struct madeira_ir_air_range *rg, unsigned vis_mask,
+                         struct mad_plan_ent *p) {
+    UINT want_range = mad_air_range_type(rg->type);
+    UINT want_param = mad_air_param_type(rg->type);
+    unsigned i, j;
+    p->param = p->idx = p->smp = 0; p->why = NULL;
+    for (i = 0; i < rs->nparams && i < MAD_ROOT_PARAM_MAX; i++) {   /* the walk of mad_air_resolve, recording */
+        const struct madeira_ir_root_param *pp = &rs->params[i];
+        if (pp->visibility < 32 && !((1u << pp->visibility) & vis_mask)) continue;
+        if (pp->type == MADEIRA_IR_PARAM_TABLE) {
+            unsigned running = 0;
+            for (j = 0; j < pp->num_ranges; j++) {
+                unsigned ri = pp->first_range + j;
+                const struct madeira_ir_root_range *rr;
+                UINT range_off;
+                if (ri >= rs->nranges) break;
+                rr = &rs->ranges[ri];
+                range_off = (rr->table_offset == 0xffffffffu) ? running : rr->table_offset;
+                if (rr->num_descriptors != ~0u) running = range_off + rr->num_descriptors;
+                if (rr->range_type != want_range) continue;
+                if (rr->register_space != rg->space) continue;
+                if (rg->lower_bound < rr->base_register) continue;
+                if (rr->num_descriptors != ~0u && rg->lower_bound >= rr->base_register + rr->num_descriptors) continue;
+                p->kind = MAD_PLAN_TABLE; p->param = i;
+                p->idx = range_off + (rg->lower_bound - rr->base_register);
+                p->smp = rg->type == MADEIRA_IR_AIR_SAMPLER;
+                return;
+            }
+            continue;
+        }
+        if (pp->type == MADEIRA_IR_PARAM_CONSTANTS) {
+            if (rg->type != MADEIRA_IR_AIR_CBV) continue;
+            if (pp->shader_register != rg->lower_bound || pp->register_space != rg->space) continue;
+            p->kind = MAD_PLAN_CONSTS; p->param = i; p->idx = pp->num_constants > 64 ? 64 : pp->num_constants;
+            return;
+        }
+        if (pp->type == want_param) {
+            if (pp->shader_register != rg->lower_bound || pp->register_space != rg->space) continue;
+            p->kind = MAD_PLAN_ROOTDESC; p->param = i;
+            p->idx = rg->type != MADEIRA_IR_AIR_CBV;   /* 1: refused after the "never set" check, as mad_air_resolve orders them */
+            return;
+        }
+    }
+    if (rg->type == MADEIRA_IR_AIR_SAMPLER) {
+        for (i = 0; i < rs->nsamplers && i < 32; i++)
+            if (rs->samplers[i].shader_register == rg->lower_bound &&
+                rs->samplers[i].register_space == rg->space &&
+                (rs->samplers[i].visibility >= 32 || ((1u << rs->samplers[i].visibility) & vis_mask))) {
+                p->kind = MAD_PLAN_STATIC; p->idx = i;
+                return;
+            }
+    }
+    p->kind = MAD_PLAN_FAIL; p->why = "no root-signature entry covers this register";
+}
+/* mad_air_resolve's contract, from the plan: one draw's live values */
+static int mad_air_plan_eval(struct mad_exec *e, const struct mad_rootsig *rs, const UINT64 *root,
+                             const UINT32 (*consts)[64], const struct mad_plan_ent *p,
+                             struct mad_descriptor *desc, UINT64 *direct_va, const char **why) {
+    *direct_va = 0;
+    memset(desc, 0, sizeof *desc);
+    switch (p->kind) {
+    case MAD_PLAN_TABLE: {
+        UINT64 table_gpu = root[p->param], slot_gpu, byte_off;
+        struct mad_heap *h;
+        if (!table_gpu) { *why = "descriptor table root argument never set"; return 0; }
+        h = p->smp ? e->smp : e->srv;
+        if (!h || !h->cpu || !h->gpu_address) { *why = "the matching descriptor heap is not bound"; return 0; }
+        slot_gpu = table_gpu + (UINT64)p->idx * sizeof(struct mad_descriptor);
+        if (slot_gpu < h->gpu_address) { *why = "descriptor address below the bound heap"; return 0; }
+        byte_off = slot_gpu - h->gpu_address;
+        if (byte_off % sizeof(struct mad_descriptor)) { *why = "descriptor address is not slot-aligned"; return 0; }
+        if (byte_off / sizeof(struct mad_descriptor) >= h->count) { *why = "descriptor address past the end of the heap"; return 0; }
+        *desc = h->cpu[byte_off / sizeof(struct mad_descriptor)];
+        return 1;
+    }
+    case MAD_PLAN_CONSTS: {
+        obj_handle_t cb; UINT64 coff, cgpu; void *ccpu;
+        if (!exec_ring_take_z(e, 1, 256, &cb, &coff, &ccpu, &cgpu)) { *why = "no ring slot for root constants"; return 0; }
+        memcpy(ccpu, consts[p->param], (size_t)p->idx * 4);
+        *direct_va = cgpu + coff;
+        return 1;
+    }
+    case MAD_PLAN_ROOTDESC:
+        if (!root[p->param]) { *why = "root descriptor never set"; return 0; }
+        if (p->idx) { *why = "root SRV/UAV has no length for this binding"; return 0; }
+        *direct_va = root[p->param];
+        return 1;
+    case MAD_PLAN_STATIC:
+        if (rs->stab_cpu && rs->stab_cpu[p->idx].gpu_va) { *desc = rs->stab_cpu[p->idx]; return 1; }
+        *why = "static sampler (its Metal sampler state could not be created)";
+        return 0;
+    default:
+        *why = p->why ? p->why : "no root-signature entry covers this register";
+        return 0;
+    }
+}
+static int mad_air_resolve_fast(struct mad_exec *e, const struct mad_rootsig *rs, const UINT64 *root,
+                                const UINT32 (*consts)[64], const struct madeira_ir_air_range *rg,
+                                unsigned vis_mask, struct mad_descriptor *desc, UINT64 *direct_va, const char **why) {
+    struct mad_plan_ent *cache, *p;
+    UINT64 h;
+    if (g_air_plan < 0) {
+        g_air_plan = mad_cfg_int_pe("air-plan", 0) ? 1 : 0;   /* measured on the host: 36.6 ns per binding searched, 38.4 ns planned (36 parameters): off by default */
+        d3d12_log("[madeira-d3d12] air-plan = %d: binding lookups %s\n", g_air_plan,
+                  g_air_plan ? "planned once per root signature, binding and stage" : "walk the root signature every time (old)");
+    }
+    if (!rs || !g_air_plan) return mad_air_resolve(e, rs, root, consts, rg, vis_mask, desc, direct_va, why);
+    if (g_plan_tls == TLS_OUT_OF_INDEXES) {
+        DWORD n = TlsAlloc();
+        if (n != TLS_OUT_OF_INDEXES &&
+            InterlockedCompareExchange((volatile LONG *)&g_plan_tls, (LONG)n, (LONG)TLS_OUT_OF_INDEXES) != (LONG)TLS_OUT_OF_INDEXES)
+            TlsFree(n);   /* another thread set it first */
+        if (g_plan_tls == TLS_OUT_OF_INDEXES) return mad_air_resolve(e, rs, root, consts, rg, vis_mask, desc, direct_va, why);
+    }
+    if (!(cache = TlsGetValue(g_plan_tls))) {
+        if (!(cache = calloc(MAD_PLAN_SLOTS, sizeof *cache)) || !TlsSetValue(g_plan_tls, cache)) {
+            free(cache);
+            return mad_air_resolve(e, rs, root, consts, rg, vis_mask, desc, direct_va, why);
+        }
+    }
+    h = (UINT64)(ULONG_PTR)rs * 0x9E3779B97F4A7C15ull ^ ((UINT64)rg->type << 40) ^ ((UINT64)rg->space << 24) ^
+        ((UINT64)rg->lower_bound << 8) ^ (UINT64)vis_mask * 0xC2B2AE3D27D4EB4Full;
+    p = &cache[(h ^ (h >> 29)) & (MAD_PLAN_SLOTS - 1)];
+    if (p->rs != rs || p->serial != rs->serial || p->type != rg->type || p->space != rg->space ||
+        p->lower != rg->lower_bound || p->vis != vis_mask) {
+        mad_air_plan(rs, rg, vis_mask, p);
+        p->rs = rs; p->serial = rs->serial; p->type = rg->type; p->space = rg->space; p->lower = rg->lower_bound; p->vis = vis_mask;
+        InterlockedIncrement(&g_plan_misses);
+    }
+    return mad_air_plan_eval(e, rs, root, consts, p, desc, direct_va, why);
 }
 
 /* ml1011: the DXBC backend's vertex-buffer table, bound at Metal index 16.
@@ -7949,12 +8140,12 @@ static int mad_air_build_tables_ex_body(struct mad_exec *e, const struct mad_roo
         UINT off = rg->ptr_offset;
 
         if (!tab) { why = "the table this range belongs to was not reported"; goto bad; }
-        if (!mad_air_resolve(e, rs, root, consts, rg, vis_mask, &de, &direct, &why)) {
+        if (!mad_air_resolve_fast(e, rs, root, consts, rg, vis_mask, &de, &direct, &why)) {
             /* If the stage filter is what lost it, the signature's visibility
              * was parsed wrong or the engine relies on lax behaviour: bind as
              * before and COUNT it, rather than trade one skipped draw for another. */
             const char *why2 = "?";
-            if (vis_mask == ~0u || !mad_air_resolve(e, rs, root, consts, rg, ~0u, &de, &direct, &why2)) goto bad;
+            if (vis_mask == ~0u || !mad_air_resolve_fast(e, rs, root, consts, rg, ~0u, &de, &direct, &why2)) goto bad;
             InterlockedIncrement(&g_vis_fallback);
         }
         if (e->sk && e->sk->tab_on) mad_skin_tok(e, rg, &de, direct);   /* madeira-bcd skin-check */
@@ -8005,10 +8196,18 @@ static int mad_air_build_tables_ex_body(struct mad_exec *e, const struct mad_roo
                     d3d12_log("[madeira-d3d12] ml1308 DXBC texture2d bindings get %s (madeira.cfg sm5-flat-views)\n",
                               g_flat_views ? "2D views of the array textures" : "the array views (old behaviour)");
                 }
-                if (g_flat_views && !(rg->flags & MADEIRA_IR_AIR_F_TEXTURE_ARRAY)) vid = mad_air_flat_view(d, vid);   /* ml1308 */
-                tab[off + 0] = vid;
-                tab[off + 1] = ((UINT64)mad_air_array_len(d, vid) << 32)
-                             | (de.metadata & 0xffffffffull);     /* min LOD clamp */
+                if (g_air_vmerge < 0) g_air_vmerge = mad_cfg_int_pe("air-view-merge", 1) ? 1 : 0;
+                if (g_air_vmerge) {   /* one view_lock probe in the common case (mad_air_view_flat_len) */
+                    UINT alen = 1;
+                    vid = mad_air_view_flat_len(d, vid, g_flat_views && !(rg->flags & MADEIRA_IR_AIR_F_TEXTURE_ARRAY), &alen);   /* ml1308 */
+                    tab[off + 0] = vid;
+                    tab[off + 1] = ((UINT64)alen << 32) | (de.metadata & 0xffffffffull);     /* min LOD clamp */
+                } else {
+                    if (g_flat_views && !(rg->flags & MADEIRA_IR_AIR_F_TEXTURE_ARRAY)) vid = mad_air_flat_view(d, vid);   /* ml1308 */
+                    tab[off + 0] = vid;
+                    tab[off + 1] = ((UINT64)mad_air_array_len(d, vid) << 32)
+                                 | (de.metadata & 0xffffffffull);     /* min LOD clamp */
+                }
             }
         } else {
             why = "range has neither the buffer nor the texture flag"; goto bad;
@@ -15863,6 +16062,7 @@ static HRESULT device_CreateRootSignature_impl(ID3D12Device *This, UINT node,
     struct mad_rootsig *r = calloc(1, sizeof *r + (size_t)total_ranges * sizeof *r->ranges);
     if (!r) return E_OUTOFMEMORY;
     r->vtbl = &g_rootsig_vtbl; r->refs = 1; r->iid = &IID_ID3D12RootSignature; r->name = "RootSignature";
+    { static volatile LONG64 rs_serial; r->serial = (UINT64)InterlockedIncrement64(&rs_serial); }   /* air-plan */
     r->ranges = total_ranges ? (struct madeira_ir_root_range *)((char *)r + sizeof *r) : NULL;
     r->nparams = nparam;
     {   /* ml1009: how big real signatures actually are, so the bound above is
