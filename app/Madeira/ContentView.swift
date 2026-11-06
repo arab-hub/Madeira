@@ -3733,8 +3733,9 @@ struct ContentView: View {
                 let p = txt.lowercased().split(separator: "x").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
                 if p.count == 2, p[0] >= 640, p[1] >= 360, p[0] <= 3840, p[1] <= 2160 { width = p[0]; height = p[1] }
             }
-            // A Steam game's own Resolution (validated above) sizes its Dock desktop.
-            if let size = profile?.resolution.split(separator: "x").compactMap({ Int($0) }), size.count == 2 {
+            // A Steam game's own Resolution (validated above) sizes its Dock desktop: its
+            // render resolution, which MetalFX brings back up to Resolution (renderScale).
+            if let size = profile?.renderResolution.split(separator: "x").compactMap({ Int($0) }), size.count == 2 {
                 width = size[0]; height = size[1]
             }
             setenv("MADEIRA_EXE", "explorer.exe", 1)

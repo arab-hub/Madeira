@@ -373,6 +373,12 @@ struct LibraryEntry: Codable, Identifiable {
     /// MetalFX spatial upscaling factor (Display › MetalFX upscaling: 1.5 or 2;
     /// nil = off), passed on as this game's `metalfx-upscale` line.
     var metalFXUpscale: Double?
+    /// Display › Render resolution: the share of Resolution the game renders at
+    /// (0.5-0.95; nil = all of it). The game's virtual monitor is the smaller size
+    /// (renderResolution) and MetalFX scales its frames back up to Resolution
+    /// (effectiveMetalFXUpscale, this game's metalfx-upscale line): a slider between
+    /// a sharper picture and more frames, in place of the 1.5x / 2x choices.
+    var renderScale: Double?
     /// ml1298: a reservation of 64 GB or more that the address space cannot hold
     /// is served with a real 16 GB part (ntdll's ios_oversize_reserve), passed on
     /// as this game's `oversize-reserve` line; nil = off, such a reservation fails.
@@ -382,16 +388,40 @@ struct LibraryEntry: Codable, Identifiable {
     /// stand for, then its own config, which wins where both set a key.
     var gameConfigText: String? {
         var lines: [String] = []
-        if let metalFXUpscale { lines.append("metalfx-upscale = \(metalFXUpscale)") }
+        if let factor = renderScaleUpscale { lines.append("metalfx-upscale = " + String(format: "%.3f", factor)) }
+        else if let metalFXUpscale { lines.append("metalfx-upscale = \(metalFXUpscale)") }
         if largeReservations == true { lines.append("oversize-reserve = 1") }
         if let config, !config.isEmpty { lines.append(config) }
         return lines.isEmpty ? nil : lines.joined(separator: "\n")
     }
 
+    /// The size the game renders at: Resolution, or renderScale's share of it
+    /// (even sizes, at least 320x240, the smallest validate() takes).
+    var renderResolution: String {
+        guard let scale = renderScale, scale < 0.999 else { return resolution }
+        let size = resolution.split(separator: "x").compactMap { Int($0) }
+        guard size.count == 2 else { return resolution }
+        let s = min(1, max(0.5, scale))
+        let w = max(320, Int((Double(size[0]) * s / 2).rounded()) * 2)
+        let h = max(240, Int((Double(size[1]) * s / 2).rounded()) * 2)
+        return "\(w)x\(h)"
+    }
+
+    /// The MetalFX factor from renderResolution back to Resolution (at most 2, as the
+    /// D3D12 runtime and DXMT take); nil without a render scale. Below 1.1 MetalFX
+    /// stays off and the screen's own scaling stretches the frame.
+    var renderScaleUpscale: Double? {
+        guard let scale = renderScale, scale < 0.999 else { return nil }
+        let out = resolution.split(separator: "x").compactMap { Int($0) }
+        let inp = renderResolution.split(separator: "x").compactMap { Int($0) }
+        guard out.count == 2, inp.count == 2, inp[0] > 0, out[0] > inp[0] else { return nil }
+        return min(2, Double(out[0]) / Double(inp[0]))
+    }
+
     var displayMode: DisplayMode { display.flatMap(DisplayMode.init(rawValue:)) ?? .fit }
 
     var launchArguments: String {
-        if desktop == true { return "/desktop=shell,\(resolution) C:\\windows\\system32\\services.exe" }
+        if desktop == true { return "/desktop=shell,\(renderResolution) C:\\windows\\system32\\services.exe" }
         return launchCommand.args
     }
 
@@ -562,7 +592,7 @@ struct LibraryEntry: Codable, Identifiable {
         let parent = batch ? nil : parent
         if runsInDesktop {
             let program = parent.map { quoted($0) + " " + quoted(path) } ?? quoted(path)
-            return ("explorer.exe", "/desktop=shell,\(resolution) " + withExtra(batch ? "cmd /c \(quoted(path))" : program))
+            return ("explorer.exe", "/desktop=shell,\(renderResolution) " + withExtra(batch ? "cmd /c \(quoted(path))" : program))
         }
         if batch { return ("C:\\windows\\system32\\cmd.exe", withExtra("/c \(quoted(path))")) }
         if let parent { return (parent, withExtra(quoted(path))) }
@@ -911,7 +941,8 @@ struct LibraryEntry: Codable, Identifiable {
         if usesLaunchOptions {
             fputs("[library] ml1163 start=\(runsInDesktop ? "desktop" : "direct") batch=\(isBatch ? 1 : 0) services=\(servicesScript != nil ? 1 : 0) cwd=\(launchDirectory)\n", stderr)
         }
-        LogStore.shared.log("[display-shape] resolution=\(resolution) mode=\(displayMode.rawValue)")
+        LogStore.shared.log("[display-shape] resolution=\(resolution) mode=\(displayMode.rawValue)"
+                            + (renderScaleUpscale.map { " render=\(renderResolution) metalfx=" + String(format: "%.3f", $0) } ?? ""))
     }
 
     /// What the bridge starts. Set on the main thread before the session begins.
@@ -924,7 +955,7 @@ struct LibraryEntry: Codable, Identifiable {
             // the virtual monitor follows this entry's Resolution, as below. "The game" starts
             // its own program below, like any library game.
             if !startsSteamGameDirectly {
-                GuestDisplay.configureSessionDefault(view: CGSize(width: 1280, height: 720), knob: resolution)
+                GuestDisplay.configureSessionDefault(view: CGSize(width: 1280, height: 720), knob: renderResolution)
                 return
             }
         }
@@ -959,7 +990,7 @@ struct LibraryEntry: Codable, Identifiable {
         // Every session's virtual monitor takes this entry's Resolution
         // (MADEIRA_SCREEN_W/H, source "knob"); for the Desktop entry it is the
         // same size as its /desktop= argument.
-        GuestDisplay.configureSessionDefault(view: CGSize(width: 1280, height: 720), knob: resolution)
+        GuestDisplay.configureSessionDefault(view: CGSize(width: 1280, height: 720), knob: renderResolution)
     }
 }
 
@@ -4459,7 +4490,9 @@ struct LibraryDetail: View {
     /// The value a page's row shows, when one setting sums it up.
     private func summary(_ page: Page) -> String? {
         switch page {
-        case .display: return entry.metalFXUpscale.map { "\(entry.resolution) · MetalFX \($0 == 2 ? "2" : "1.5")×" } ?? entry.resolution
+        case .display:
+            if let scale = entry.renderScale, scale < 0.999 { return "\(entry.resolution) · \(Int((scale * 100).rounded()))%" }
+            return entry.metalFXUpscale.map { "\(entry.resolution) · MetalFX \($0 == 2 ? "2" : "1.5")×" } ?? entry.resolution
         case .controls: return entry.controllerMode == "keys" ? "Keyboard and mouse" : entry.controllerMode == "dinput" ? "XInput and DirectInput" : nil
         case .launch: return entry.usesLaunchOptions ? (entry.runsInDesktop ? L("Wine desktop") : L("Directly")) : nil
         case .steam: return entry.startsSteamGameDirectly ? "The game" : "Madeira Dock"
@@ -4522,10 +4555,27 @@ struct LibraryDetail: View {
             // Every setting here is the Desktop's too: its programs present through
             // the same path, and its launch applies them like a game's
             // (applyEnvironment, gameConfigText). check-frontend holds the parity.
-            Picker("MetalFX upscaling", selection: $entry.metalFXUpscale) {
-                Text("Off").tag(Double?.none)
-                Text("1.5×").tag(Double?.some(1.5))
-                Text("2×").tag(Double?.some(2))
+            // Render resolution: the game renders at this share of Resolution and MetalFX
+            // brings each frame back up to it (renderResolution, renderScaleUpscale).
+            // Below 100% it takes the place of the 1.5x / 2x choices.
+            VStack(alignment: .leading, spacing: 4) {
+                let scale = entry.renderScale ?? 1
+                HStack {
+                    Text("Render resolution")
+                    Spacer()
+                    Text(scale < 0.999 ? "\(Int((scale * 100).rounded()))% · \(entry.renderResolution.replacingOccurrences(of: "x", with: "×"))" : "100%")
+                        .foregroundStyle(.secondary).monospacedDigit()
+                }
+                Slider(value: Binding(get: { entry.renderScale ?? 1 },
+                                      set: { entry.renderScale = $0 >= 0.999 ? nil : ($0 * 20).rounded() / 20 }),
+                       in: 0.5...1, step: 0.05)
+            }
+            if (entry.renderScale ?? 1) >= 0.999 {
+                Picker("MetalFX upscaling", selection: $entry.metalFXUpscale) {
+                    Text("Off").tag(Double?.none)
+                    Text("1.5×").tag(Double?.some(1.5))
+                    Text("2×").tag(Double?.some(2))
+                }
             }
             Toggle("Frame generation (experimental)", isOn: Binding(get: { entry.frameGeneration ?? false }, set: { entry.frameGeneration = $0 ? true : nil }))
             if entry.frameGeneration == true {
@@ -4533,7 +4583,7 @@ struct LibraryDetail: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
         } header: { Text("Display") } footer: {
-            Text("MetalFX renders at the resolution above and upscales it (Direct3D 11 and 12).")
+            Text("Render resolution: lower is faster and softer; MetalFX upscales the frames to the resolution above (Direct3D 11 and 12, from the next start). At 100%, MetalFX upscaling renders at the resolution above and upscales it.")
         }
     }
 
