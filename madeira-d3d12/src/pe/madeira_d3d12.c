@@ -1613,8 +1613,13 @@ struct mad_fence {
     volatile LONG64 submitted;   /* ml1061: highest value a queue has been ASKED to signal */
     volatile LONG64 committed;   /* ml1120: highest value whose Signal batch has been COMMITTED to Metal (or signalled on the CPU) */
     struct mad_queue *volatile sig_q; volatile LONG64 sig_value, sig_batch;   /* madeira-bcd vis-trace: the newest Signal, its queue and the batch it needs committed */
-    struct { UINT64 value; HANDLE event; LONGLONG t_reg; } waiters[MAD_FENCE_WAITERS];   /* ml1109: t_reg = registration time */
+    struct { UINT64 value; HANDLE event; LONGLONG t_reg; DWORD tid; LONG64 lag; LONGLONG t_sig, t_cmt; } waiters[MAD_FENCE_WAITERS];   /* ml1109: t_reg = registration time; the rest fence-census */
     unsigned nwaiters;
+    /* madeira-bcd fence-census: this fence's creation number, a name the game gave it,
+     * the queue type of its newest Signal, and its last 8 Signals: value, when the game
+     * called Signal and when that batch was committed to Metal. */
+    unsigned fc_id; int fc_qtype, fc_commit; char fc_name[32];
+    struct { UINT64 v; LONGLONG t, t_cmt; } fc_sig[8]; unsigned fc_sig_i;
     /* fence-poll-backoff (opt-in, see mad_fpb_init): the last value a
      * poll returned, when (mad_tick), how many polls in a row saw it unchanged,
      * and polls not yet added to the ml1109 count. Written without atomics by the
@@ -1623,7 +1628,153 @@ struct mad_fence {
     LONG fpb_run, fpb_polls;
 };
 
+/* madeira-bcd fence-census (opt-in, madeira.cfg fence-census = 1): which fences the
+ * game waits on and what each wait is made of. Cyberpunk 2077 sat ~26 ms of a ~49 ms
+ * frame in ~13 fence waits with the GPU only 43 % busy, and the ml1109 total cannot say
+ * whether it waits for the batch it just submitted (one frame in flight) or for an
+ * older one, nor whether the time is our encoding or the GPU. Every 5 s, per fence:
+ * waits and polls per frame, the mean wait, how many signals the waited value was
+ * behind the newest one the game had asked for (0 = the newest), and from the game's
+ * Signal call: to the wait, to the batch's commit (our encoding), to done (the GPU).
+ * Diagnostic only; read once per game start. */
+static int g_fc_on = -1;
+static LONG g_fc_next_id;
+#define MAD_FC_SLOTS 32
+static SRWLOCK g_fc_lock = SRWLOCK_INIT;
+static struct mad_fc_slot {
+    const void *f; unsigned id; int qtype; char name[32];
+    LONG64 waits, ticks, lag_sum, newest, ahead, nsig, sincesig, sig2cmt, cmt2done, ncmt, polls, blocked_inline;
+    DWORD tid[6];
+} g_fc[MAD_FC_SLOTS];
+static int mad_fc_on(void) {
+    if (g_fc_on < 0) {
+        g_fc_on = mad_cfg_int_pe("fence-census", 0) ? 1 : 0;
+        if (g_fc_on) d3d12_log("[madeira-d3d12] fence-census = 1: per-fence waits every 5 s ([perf] fence-census)\n");
+    }
+    return g_fc_on;
+}
+/* g_fc_lock held: the slot for f, made if there is room */
+static struct mad_fc_slot *mad_fc_slot_of(const struct mad_fence *f) {
+    int i, room = -1;
+    for (i = 0; i < MAD_FC_SLOTS; i++) {
+        if (g_fc[i].f == f) return &g_fc[i];
+        if (!g_fc[i].f && room < 0) room = i;
+    }
+    if (room < 0) return NULL;
+    memset(&g_fc[room], 0, sizeof g_fc[room]);
+    g_fc[room].f = f; g_fc[room].id = f->fc_id; g_fc[room].qtype = f->fc_qtype;
+    memcpy(g_fc[room].name, f->fc_name, sizeof g_fc[room].name);
+    return &g_fc[room];
+}
+static void mad_fc_tid(struct mad_fc_slot *s, DWORD tid) {
+    unsigned j;
+    for (j = 0; j < 6; j++) { if (s->tid[j] == tid) return; if (!s->tid[j]) { s->tid[j] = tid; return; } }
+}
+/* a waiter of f released at t_done (f->lock held) */
+static void mad_fc_wait_done(const struct mad_fence *f, unsigned i, LONGLONG t_done) {
+    struct mad_fc_slot *s;
+    AcquireSRWLockExclusive(&g_fc_lock);
+    if ((s = mad_fc_slot_of(f))) {
+        LONG64 lag = f->waiters[i].lag;
+        s->waits++; s->ticks += t_done - f->waiters[i].t_reg;
+        if (lag >= 0) { s->lag_sum += lag; if (!lag) s->newest++; } else s->ahead++;
+        if (f->waiters[i].t_sig) {
+            s->nsig++; s->sincesig += f->waiters[i].t_reg - f->waiters[i].t_sig;
+            if (f->waiters[i].t_cmt) { s->ncmt++; s->sig2cmt += f->waiters[i].t_cmt - f->waiters[i].t_sig; s->cmt2done += t_done - f->waiters[i].t_cmt; }
+        }
+        mad_fc_tid(s, f->waiters[i].tid);
+    }
+    ReleaseSRWLockExclusive(&g_fc_lock);
+}
+static void mad_fc_poll(const struct mad_fence *f, LONGLONG blocked) {
+    struct mad_fc_slot *s;
+    AcquireSRWLockExclusive(&g_fc_lock);
+    if ((s = mad_fc_slot_of(f))) {
+        if (blocked >= 0) s->blocked_inline += blocked; else s->polls++;
+        mad_fc_tid(s, GetCurrentThreadId());
+    }
+    ReleaseSRWLockExclusive(&g_fc_lock);
+}
+/* the game's Signal(value) and, later, its batch's commit */
+static void mad_fc_signal(struct mad_fence *f, UINT64 value, int qtype) {
+    LARGE_INTEGER t; unsigned k;
+    QueryPerformanceCounter(&t);
+    k = (unsigned)InterlockedIncrement((LONG *)&f->fc_sig_i) & 7;
+    f->fc_sig[k].t_cmt = 0; f->fc_sig[k].t = t.QuadPart; f->fc_sig[k].v = value;
+    f->fc_qtype = qtype;
+}
+static void mad_fc_committed(struct mad_fence *f, UINT64 value) {
+    LARGE_INTEGER t; unsigned k;
+    QueryPerformanceCounter(&t);
+    for (k = 0; k < 8; k++) if (f->fc_sig[k].v == value && !f->fc_sig[k].t_cmt) f->fc_sig[k].t_cmt = t.QuadPart;
+    EnterCriticalSection(&f->lock);
+    for (k = 0; k < f->nwaiters; k++) if (f->waiters[k].value == value && !f->waiters[k].t_cmt) f->waiters[k].t_cmt = t.QuadPart;
+    LeaveCriticalSection(&f->lock);
+}
+static void mad_fc_report(double frames, double qpf) {
+    struct mad_fc_slot s[MAD_FC_SLOTS];
+    int i, j, n = 0;
+    AcquireSRWLockExclusive(&g_fc_lock);
+    for (i = 0; i < MAD_FC_SLOTS; i++) if (g_fc[i].f) s[n++] = g_fc[i];
+    memset(g_fc, 0, sizeof g_fc);
+    ReleaseSRWLockExclusive(&g_fc_lock);
+    for (i = 0; i < n; i++) for (j = i + 1; j < n; j++)
+        if (s[j].ticks + s[j].blocked_inline > s[i].ticks + s[i].blocked_inline) { struct mad_fc_slot x = s[i]; s[i] = s[j]; s[j] = x; }
+    for (i = 0; i < n && i < 8; i++) {
+        const struct mad_fc_slot *c = &s[i];
+        if (!c->waits && !c->polls && !c->blocked_inline) continue;
+        d3d12_log("[perf] fence-census #%u%s%s%s (queue type %d) per frame: %.1f waits, %.2f ms each, %.1f ms in all, %.1f ms blocked in SetEventOnCompletion(NULL), %.1f polls; "
+                  "%.0f%% for the newest Signal, %.2f behind on average, %lld ahead of any Signal; from the game's Signal: wait %.2f ms, committed %.2f ms, then done %.2f ms; threads %04x %04x %04x %04x %04x %04x\n",
+                  c->id, c->name[0] ? " \"" : "", c->name, c->name[0] ? "\"" : "", c->qtype,
+                  c->waits / frames, c->waits ? 1000.0 * c->ticks / qpf / c->waits : 0.0, 1000.0 * c->ticks / qpf / frames,
+                  1000.0 * c->blocked_inline / qpf / frames, c->polls / frames,
+                  (c->waits - c->ahead) ? 100.0 * c->newest / (double)(c->waits - c->ahead) : 0.0,
+                  (c->waits - c->ahead) ? (double)c->lag_sum / (double)(c->waits - c->ahead) : 0.0, (long long)c->ahead,
+                  c->nsig ? 1000.0 * c->sincesig / qpf / c->nsig : 0.0, c->ncmt ? 1000.0 * c->sig2cmt / qpf / c->ncmt : 0.0,
+                  c->ncmt ? 1000.0 * c->cmt2done / qpf / c->ncmt : 0.0,
+                  (unsigned)c->tid[0], (unsigned)c->tid[1], (unsigned)c->tid[2], (unsigned)c->tid[3], (unsigned)c->tid[4], (unsigned)c->tid[5]);
+    }
+}
+
+/* madeira-bcd fence-commit-ids (experiment, default empty): the fences named here, by
+ * their creation number in [perf] fence-census ("all" = every fence), complete when
+ * the batch their Signal covers is COMMITTED to Metal instead of when the GPU has run
+ * it. A game that waits for the frame it has just submitted (one frame in flight) can
+ * then record the next frame while the GPU still runs this one. The GPU's own order
+ * is unchanged (queue Waits follow commits, ml1120), but the game may reuse memory
+ * the GPU still reads and its readbacks may be a frame old: an experiment, per game.
+ * Read when the first fence is created; [perf] fence-commit counts them. */
+static int g_fcommit_on = -1, g_fcommit_all, g_fcommit_nids;
+static unsigned g_fcommit_ids[32];
+static LONG g_fcommit_early;
+static int mad_cfg_str_pe(const char *key, char *out, size_t cap);
+static int mad_fcommit_listed(unsigned id) {
+    int i;
+    if (g_fcommit_on < 0) {
+        char v[256]; char *p = v;
+        g_fcommit_on = 0;
+        if (mad_cfg_str_pe("fence-commit-ids", v, sizeof v) && v[0]) {
+            if (!strcmp(v, "all")) g_fcommit_all = 1;
+            else while (*p && g_fcommit_nids < 32) {
+                char *end; unsigned long n = strtoul(p, &end, 10);
+                if (end == p) break;
+                if (n) g_fcommit_ids[g_fcommit_nids++] = (unsigned)n;
+                p = end; while (*p == ',' || *p == ' ' || *p == ';') p++;
+            }
+            g_fcommit_on = g_fcommit_all || g_fcommit_nids > 0;
+            if (g_fcommit_on) d3d12_log("[madeira-d3d12] fence-commit-ids = %s: those fences complete when their batch is committed, not when the GPU ran it (experiment)\n", v);
+        }
+    }
+    if (!g_fcommit_on) return 0;
+    if (g_fcommit_all) return 1;
+    for (i = 0; i < g_fcommit_nids; i++) if (g_fcommit_ids[i] == id) return 1;
+    return 0;
+}
+
 static void fence_set_locked(struct mad_fence *f, UINT64 v) {
+    /* fence-commit-ids: such a fence already moved at the commit; the GPU's completion
+     * of an older value must not take it back */
+    if (f->fc_commit && v < __atomic_load_n(&f->value, __ATOMIC_ACQUIRE)) return;
     /* fence-poll-backoff: a release store, so a poll that reads the
      * value without the lock sees what was written before it (the same order the
      * critical section gives a locked reader) */
@@ -1634,6 +1785,7 @@ static void fence_set_locked(struct mad_fence *f, UINT64 v) {
         if (f->waiters[i].value <= v) {
             LARGE_INTEGER t; QueryPerformanceCounter(&t);   /* ml1109: how long the game sat on this fence */
             InterlockedExchangeAdd64(&g_perf_wait_ticks, t.QuadPart - f->waiters[i].t_reg);
+            if (g_fc_on > 0) mad_fc_wait_done(f, i, t.QuadPart);   /* fence-census */
             SetEvent(f->waiters[i].event);
         }
         else f->waiters[w++] = f->waiters[i];
@@ -1761,6 +1913,7 @@ static UINT64 mad_fpb_sleep(struct mad_fence *f, UINT64 seen) {
 }
 static UINT64 STDMETHODCALLTYPE fence_GetCompletedValue(ID3D12Fence *This) {
     struct mad_fence *f = (struct mad_fence *)This;
+    if (g_fc_on > 0) mad_fc_poll(f, -1);   /* fence-census */
     if (g_fpb < 0) mad_fpb_init();
     if (g_fpb > 0) {   /* fence-poll-backoff */
         UINT64 v = __atomic_load_n(&f->value, __ATOMIC_ACQUIRE), now = mad_tick();
@@ -1798,10 +1951,21 @@ static HRESULT STDMETHODCALLTYPE fence_SetEventOnCompletion(ID3D12Fence *This, U
          * can make progress. Re-checked in a loop because a condition variable
          * may wake spuriously and because an intervening signal may not have
          * reached our value yet. */
+        LARGE_INTEGER t0, t1;
+        if (g_fc_on > 0) QueryPerformanceCounter(&t0);   /* fence-census */
         while (f->value < value)
             SleepConditionVariableCS(&f->cv, &f->lock, INFINITE);
+        if (g_fc_on > 0) { QueryPerformanceCounter(&t1); mad_fc_poll(f, t1.QuadPart - t0.QuadPart); }
     } else if (f->nwaiters < MAD_FENCE_WAITERS) {
         { LARGE_INTEGER t; QueryPerformanceCounter(&t); f->waiters[f->nwaiters].t_reg = t.QuadPart; }   /* ml1109 */
+        f->waiters[f->nwaiters].t_sig = f->waiters[f->nwaiters].t_cmt = 0;
+        if (g_fc_on > 0) {   /* fence-census: who waits, and for which of the game's Signals */
+            unsigned k;
+            f->waiters[f->nwaiters].tid = GetCurrentThreadId();
+            f->waiters[f->nwaiters].lag = (LONG64)__atomic_load_n(&f->submitted, __ATOMIC_ACQUIRE) - (LONG64)value;
+            for (k = 0; k < 8; k++)
+                if (f->fc_sig[k].v == value) { f->waiters[f->nwaiters].t_sig = f->fc_sig[k].t; f->waiters[f->nwaiters].t_cmt = f->fc_sig[k].t_cmt; break; }
+        }
         InterlockedIncrement(&g_perf_waits);
         f->waiters[f->nwaiters].value = value;
         f->waiters[f->nwaiters].event = event;
@@ -1819,6 +1983,12 @@ static HRESULT STDMETHODCALLTYPE fence_Signal(ID3D12Fence *This, UINT64 value) {
     fence_set_locked(f, value);
     LeaveCriticalSection(&f->lock);
     mad_fence_committed(f, value);   /* ml1120: a CPU signal releases queue Waits too */
+    return S_OK;
+}
+/* fence-census: the name a game gives its fence */
+static HRESULT STDMETHODCALLTYPE fence_SetName(ID3D12Fence *This, LPCWSTR name) {
+    struct mad_fence *f = (struct mad_fence *)This;
+    if (name) WideCharToMultiByte(CP_UTF8, 0, name, -1, f->fc_name, (int)sizeof f->fc_name - 1, NULL, NULL);
     return S_OK;
 }
 
@@ -10790,6 +10960,10 @@ static void mad_perf_present(void) {
                   g_perf_presents ? 1000.0 * g_perf_wait_ticks / (double)fq.QuadPart / g_perf_presents : 0.0, 100.0 * g_perf_wait_ticks / (double)fq.QuadPart / wall,
                   g_perf_presents ? (double)g_perf_polls / g_perf_presents : 0.0, g_perf_presents ? (double)g_perf_qwait_sleeps / g_perf_presents : 0.0,
                   g_perf_sig_lat_n ? 1000.0 * g_perf_sig_lat_ticks / (double)fq.QuadPart / g_perf_sig_lat_n : 0.0, g_perf_sig_lat_n);
+        if (g_fc_on > 0 && g_perf_presents) mad_fc_report((double)g_perf_presents, (double)fq.QuadPart);   /* fence-census */
+        if (g_fcommit_on > 0 && g_perf_presents)   /* fence-commit-ids */
+            d3d12_log("[perf] fence-commit per frame: %.1f fence values completed at their commit\n",
+                      (double)InterlockedExchange(&g_fcommit_early, 0) / g_perf_presents);
         if (g_fpb > 0 && g_perf_presents) {   /* fence-poll-backoff */
             LONG bn = InterlockedExchange(&g_fpb_n, 0), bm = InterlockedExchange(&g_fpb_moved, 0);
             LONG64 bt = InterlockedExchange64(&g_fpb_ticks, 0);
@@ -11180,6 +11354,7 @@ static HRESULT STDMETHODCALLTYPE queue_Signal(ID3D12CommandQueue *This, ID3D12Fe
         sf->sig_batch = (LONG64)(__atomic_load_n(&q->batches, __ATOMIC_ACQUIRE) + (q->open_cb ? 1 : 0));
         sf->sig_q = q; sf->sig_value = (LONG64)value;
     }
+    if (mad_fc_on()) mad_fc_signal((struct mad_fence *)fence, value, (int)q->type);   /* fence-census: before submitted moves */
     {   /* ml1061 */
         struct mad_fence *sf = (struct mad_fence *)fence; LONG64 cur;
         do { cur = sf->submitted; } while ((UINT64)cur < value && InterlockedCompareExchange64(&sf->submitted, (LONG64)value, cur) != cur);
@@ -11250,7 +11425,13 @@ static int mad_async_on(void) {
 /* Signal has reached Metal (its batch is committed): release queue Waits. */
 static void mad_fence_committed(struct mad_fence *f, UINT64 value) {
     LONG64 cur;
+    if (g_fc_on > 0) mad_fc_committed(f, value);   /* fence-census */
     do { cur = f->committed; } while ((UINT64)cur < value && InterlockedCompareExchange64(&f->committed, (LONG64)value, cur) != cur);
+    if (f->fc_commit) {   /* fence-commit-ids: complete it now */
+        EnterCriticalSection(&f->lock);
+        if (value > f->value) { fence_set_locked(f, value); InterlockedIncrement(&g_fcommit_early); }
+        LeaveCriticalSection(&f->lock);
+    }
     if (g_commit_ready == 1) {
         EnterCriticalSection(&g_commit_lock);
         WakeAllConditionVariable(&g_commit_cv);
@@ -12139,6 +12320,8 @@ static HRESULT STDMETHODCALLTYPE device_CreateFence(ID3D12Device *This, UINT64 i
     struct mad_fence *f = calloc(1, sizeof *f);
     if (!f) return E_OUTOFMEMORY;
     f->vtbl = &g_fence_vtbl; f->refs = 1; f->iid = &IID_ID3D12Fence; f->name = "Fence";
+    f->fc_id = (unsigned)InterlockedIncrement(&g_fc_next_id);   /* fence-census */
+    f->fc_commit = mad_fcommit_listed(f->fc_id);                /* fence-commit-ids */
     f->value = initial;
     InitializeCriticalSection(&f->lock);
     InitializeConditionVariable(&f->cv);
@@ -21433,6 +21616,7 @@ static void build_vtables(void) {
     g_fence_vtbl.GetCompletedValue      = fence_GetCompletedValue;
     g_fence_vtbl.SetEventOnCompletion   = fence_SetEventOnCompletion;
     g_fence_vtbl.Signal                 = fence_Signal;
+    g_fence_vtbl.SetName                = fence_SetName;   /* fence-census */
 }
 
 /* ---- exports ------------------------------------------------------------- */
