@@ -1619,7 +1619,7 @@ struct mad_fence {
     /* madeira-bcd fence-census: this fence's creation number, a name the game gave it,
      * the queue type of its newest Signal, and its last 8 Signals: value, when the game
      * called Signal and when that batch was committed to Metal. */
-    unsigned fc_id; int fc_qtype, fc_commit; char fc_name[32];
+    unsigned fc_id; int fc_qtype, fc_commit, fc_residency; char fc_name[32];
     struct { UINT64 v; LONGLONG t, t_cmt; } fc_sig[8]; unsigned fc_sig_i;
     /* fence-poll-backoff (opt-in, see mad_fpb_init): the last value a
      * poll returned, when (mad_tick), how many polls in a row saw it unchanged,
@@ -1991,9 +1991,41 @@ static HRESULT STDMETHODCALLTYPE fence_Signal(ID3D12Fence *This, UINT64 value) {
     return S_OK;
 }
 /* fence-census: the name a game gives its fence */
+/* fence-residency-early (default 1): a fence named for residency (its name contains
+ * "residency", any case: Cyberpunk 2077's three are "residencyFence") completes when the
+ * game signals it, not when the GPU has run the work before the Signal.
+ *
+ * Why it is safe here: such a fence exists so a residency manager knows the GPU is done
+ * with an object before it Evicts it, and that MakeResident has finished before work
+ * that needs it runs. On this unified-memory device MakeResident and Evict do nothing
+ * (device_MakeResident / device_Evict), so nothing is ever paged out under the GPU.
+ * GPU-side Waits on the fence still follow the commits (ml1120), not this value.
+ *
+ * Measured (2026-11-06, census of 21:43): Cyberpunk waited ~10 times a frame on its
+ * direct queue's residencyFence, 100% for the newest Signal, ~20 ms of a ~45 ms frame,
+ * because its budget sits below what Metal has allocated (ml1075 trims it as the
+ * footprint nears the kill line). Raising the budget instead (vram-mb 4096, trim off)
+ * removed the waits but let the game stream until iOS killed it at 6.13 of 6.14 GB.
+ * This keeps the budget, and the memory behaviour, as they were. 0 turns it off;
+ * [perf] residency counts the completions. */
+static int g_fres_on = -1;
+static LONG g_fres_early;
+static void mad_fres_check(struct mad_fence *f) {
+    char low[32]; unsigned i;
+    if (g_fres_on < 0) g_fres_on = mad_cfg_int_pe("fence-residency-early", 1) ? 1 : 0;
+    if (!g_fres_on) return;
+    for (i = 0; i + 1 < sizeof low && f->fc_name[i]; i++) low[i] = (char)((f->fc_name[i] >= 'A' && f->fc_name[i] <= 'Z') ? f->fc_name[i] + 32 : f->fc_name[i]);
+    low[i] = 0;
+    if (!strstr(low, "residency") || f->fc_residency) return;
+    f->fc_residency = 1;
+    f->fc_commit = 1;   /* fence_set_locked: the GPU's later completion must not take it back */
+    d3d12_log("[madeira-d3d12] fence #%u \"%s\": completes when the game signals it (fence-residency-early; MakeResident and Evict do nothing here)\n",
+              f->fc_id, f->fc_name);
+}
 static HRESULT STDMETHODCALLTYPE fence_SetName(ID3D12Fence *This, LPCWSTR name) {
     struct mad_fence *f = (struct mad_fence *)This;
     if (name) WideCharToMultiByte(CP_UTF8, 0, name, -1, f->fc_name, (int)sizeof f->fc_name - 1, NULL, NULL);
+    mad_fres_check(f);
     return S_OK;
 }
 
@@ -10966,11 +10998,13 @@ static void mad_perf_present(void) {
                   g_perf_presents ? (double)g_perf_polls / g_perf_presents : 0.0, g_perf_presents ? (double)g_perf_qwait_sleeps / g_perf_presents : 0.0,
                   g_perf_sig_lat_n ? 1000.0 * g_perf_sig_lat_ticks / (double)fq.QuadPart / g_perf_sig_lat_n : 0.0, g_perf_sig_lat_n);
         if (g_fc_on > 0 && g_perf_presents) mad_fc_report((double)g_perf_presents, (double)fq.QuadPart);   /* fence-census */
-        if (g_perf_presents && (g_res_make || g_res_evict)) {   /* the game's residency calls (device_MakeResident) */
+        if (g_perf_presents && (g_res_make || g_res_evict || g_fres_early)) {   /* the game's residency calls (device_MakeResident) */
             double nf = (double)g_perf_presents;
-            d3d12_log("[perf] residency per frame: MakeResident %.1f calls (%.1f objects), Evict %.1f calls (%.1f objects)\n",
+            d3d12_log("[perf] residency per frame: MakeResident %.1f calls (%.1f objects), Evict %.1f calls (%.1f objects), "
+                      "residency fence values completed at the game's Signal %.1f (fence-residency-early)\n",
                       InterlockedExchange(&g_res_make, 0) / nf, InterlockedExchange(&g_res_make_objs, 0) / nf,
-                      InterlockedExchange(&g_res_evict, 0) / nf, InterlockedExchange(&g_res_evict_objs, 0) / nf);
+                      InterlockedExchange(&g_res_evict, 0) / nf, InterlockedExchange(&g_res_evict_objs, 0) / nf,
+                      InterlockedExchange(&g_fres_early, 0) / nf);
         }
         if (g_fcommit_on > 0 && g_perf_presents)   /* fence-commit-ids */
             d3d12_log("[perf] fence-commit per frame: %.1f fence values completed at their commit\n",
@@ -11370,6 +11404,12 @@ static HRESULT STDMETHODCALLTYPE queue_Signal(ID3D12CommandQueue *This, ID3D12Fe
     {   /* ml1061 */
         struct mad_fence *sf = (struct mad_fence *)fence; LONG64 cur;
         do { cur = sf->submitted; } while ((UINT64)cur < value && InterlockedCompareExchange64(&sf->submitted, (LONG64)value, cur) != cur);
+    }
+    if (((struct mad_fence *)fence)->fc_residency) {   /* fence-residency-early: complete it now (mad_fres_check) */
+        struct mad_fence *sf = (struct mad_fence *)fence;
+        EnterCriticalSection(&sf->lock);
+        if (value > sf->value) { fence_set_locked(sf, value); InterlockedIncrement(&g_fres_early); }
+        LeaveCriticalSection(&sf->lock);
     }
     if (q->sub_thread) {   /* ml1120 */
         struct mad_subjob *j = calloc(1, sizeof *j);
