@@ -1744,7 +1744,7 @@ static void mad_fc_report(double frames, double qpf) {
  * is unchanged (queue Waits follow commits, ml1120), but the game may reuse memory
  * the GPU still reads and its readbacks may be a frame old: an experiment, per game.
  * Read when the first fence is created; [perf] fence-commit counts them. */
-static int g_fcommit_on = -1, g_fcommit_all, g_fcommit_nids;
+static int g_fcommit_on = -1, g_fcommit_all, g_fcommit_nids, g_fcommit_qmask;   /* qmask: "q0".."q3", fences last signalled on that queue type */
 static unsigned g_fcommit_ids[32];
 static LONG g_fcommit_early;
 static int mad_cfg_str_pe(const char *key, char *out, size_t cap);
@@ -1756,12 +1756,16 @@ static int mad_fcommit_listed(unsigned id) {
         if (mad_cfg_str_pe("fence-commit-ids", v, sizeof v) && v[0]) {
             if (!strcmp(v, "all")) g_fcommit_all = 1;
             else while (*p && g_fcommit_nids < 32) {
-                char *end; unsigned long n = strtoul(p, &end, 10);
-                if (end == p) break;
-                if (n) g_fcommit_ids[g_fcommit_nids++] = (unsigned)n;
+                char *end; unsigned long n;
+                if (*p == 'q' && p[1] >= '0' && p[1] <= '3') { g_fcommit_qmask |= 1 << (p[1] - '0'); end = p + 2; }
+                else {
+                    n = strtoul(p, &end, 10);
+                    if (end == p) break;
+                    if (n) g_fcommit_ids[g_fcommit_nids++] = (unsigned)n;
+                }
                 p = end; while (*p == ',' || *p == ' ' || *p == ';') p++;
             }
-            g_fcommit_on = g_fcommit_all || g_fcommit_nids > 0;
+            g_fcommit_on = g_fcommit_all || g_fcommit_nids > 0 || g_fcommit_qmask;
             if (g_fcommit_on) d3d12_log("[madeira-d3d12] fence-commit-ids = %s: those fences complete when their batch is committed, not when the GPU ran it (experiment)\n", v);
         }
     }
@@ -11355,6 +11359,7 @@ static HRESULT STDMETHODCALLTYPE queue_Signal(ID3D12CommandQueue *This, ID3D12Fe
         sf->sig_q = q; sf->sig_value = (LONG64)value;
     }
     if (mad_fc_on()) mad_fc_signal((struct mad_fence *)fence, value, (int)q->type);   /* fence-census: before submitted moves */
+    else if (g_fcommit_qmask) ((struct mad_fence *)fence)->fc_qtype = (int)q->type;     /* fence-commit-ids q<type> */
     {   /* ml1061 */
         struct mad_fence *sf = (struct mad_fence *)fence; LONG64 cur;
         do { cur = sf->submitted; } while ((UINT64)cur < value && InterlockedCompareExchange64(&sf->submitted, (LONG64)value, cur) != cur);
@@ -11427,9 +11432,9 @@ static void mad_fence_committed(struct mad_fence *f, UINT64 value) {
     LONG64 cur;
     if (g_fc_on > 0) mad_fc_committed(f, value);   /* fence-census */
     do { cur = f->committed; } while ((UINT64)cur < value && InterlockedCompareExchange64(&f->committed, (LONG64)value, cur) != cur);
-    if (f->fc_commit) {   /* fence-commit-ids: complete it now */
+    if (f->fc_commit || (g_fcommit_qmask && f->fc_qtype >= 0 && ((g_fcommit_qmask >> f->fc_qtype) & 1))) {   /* fence-commit-ids: complete it now */
         EnterCriticalSection(&f->lock);
-        if (value > f->value) { fence_set_locked(f, value); InterlockedIncrement(&g_fcommit_early); }
+        if (value > f->value) { f->fc_commit = 1; fence_set_locked(f, value); InterlockedIncrement(&g_fcommit_early); }
         LeaveCriticalSection(&f->lock);
     }
     if (g_commit_ready == 1) {
